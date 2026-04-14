@@ -79,7 +79,28 @@ parser.add_argument("--ema-decays", type=str, default="0.95",
                     help="Comma-separated EMA decay rates, e.g. '0.999,0.9995,0.9998'")
 parser.add_argument("--ema-start-frac", type=float, default=0.90,
                     help="Fraction of training after which to start EMA tracking")
+parser.add_argument("--ensemble-mode", type=str, default="prob", choices=["prob", "logit"],
+                    help="Ensemble averaging method: 'prob' averages softmax probabilities, 'logit' averages raw logits")
+parser.add_argument("--optimizer", type=str, default="hybrid", choices=["hybrid", "muon", "adamw"],
+                    help="'hybrid' = Muon for matrices + AdamW for rest (default), "
+                         "'muon' = Muon for all trainable params, "
+                         "'adamw' = pure AdamW for all params")
+parser.add_argument("--completep", action="store_true", default=False,
+                    help="Enable CompleteP: muP width scaling + 1/L depth scaling")
+parser.add_argument("--mup-base-width", type=int, default=256,
+                    help="Base width for muP LR scaling (only with --completep and --optimizer adamw)")
+parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
+                    choices=["init", "init_shuffle"],
+                    help="'init' = different model inits, same data order; "
+                         "'init_shuffle' = different inits AND data orders (default)")
+parser.add_argument("--no-compile", action="store_true", default=False,
+                    help="Disable torch.compile (use eager mode; needed when Triton/Python.h unavailable)")
+parser.add_argument("--no-distill", action="store_true", default=False,
+                    help="Disable chain distillation; each model trains independently on hard labels only")
 args = parser.parse_args()
+
+if args.no_compile:
+    torch._dynamo.config.disable = True
 
 if args.output_json and not args.save_result:
     args.save_result = args.output_json
@@ -185,10 +206,32 @@ def _load_fa3():
 
 _fa3 = _load_fa3()
 
+def _load_fa2():
+    try:
+        from flash_attn import flash_attn_func as _fa2_func
+        return _fa2_func
+    except (ImportError, OSError):
+        return None
+
+_fa2 = None if _fa3 is not None else _load_fa2()
+
+# SDPA fallback: always available in torch >= 2.0
+_use_sdpa = (_fa3 is None and _fa2 is None)
+
 
 def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
-    """Flash Attention for training (FA3 only). q,k,v: (B, T, H, D)."""
-    return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    """Flash Attention for training. Prefers FA3 > FA2 > PyTorch SDPA.
+    q, k, v: (B, T, H, D) for FA3/FA2; transposed internally for SDPA.
+    """
+    if _fa3 is not None:
+        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    if _fa2 is not None:
+        return _fa2(q, k, v, causal=causal, window_size=window_size)
+    # SDPA fallback: expects (B, H, T, D)
+    q_s, k_s, v_s = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+    # SDPA sliding window: only supported in torch >= 2.5 via enable_gqa; approximate with full attention if window requested
+    out = F.scaled_dot_product_attention(q_s, k_s, v_s, is_causal=causal)
+    return out.transpose(1, 2)  # back to (B, T, H, D)
 
 flash_attn = SimpleNamespace(flash_attn_func=flash_attn_func)
 
@@ -206,6 +249,9 @@ class GPTConfig:
     n_embd: int = N_EMBD
     window_pattern: str = WINDOW_PATTERN
     dropout: float = 0.0
+    completep: bool = False
+    mup_base_width: int = 256
+    optimizer: str = "hybrid"
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -271,14 +317,15 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config, layer_idx, depth_scale=1.0):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
+        self.depth_scale = depth_scale
 
     def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
-        x = x + self.mlp(norm(x))
+        x = x + self.depth_scale * self.attn(norm(x), ve, cos_sin, window_size)
+        x = x + self.depth_scale * self.mlp(norm(x))
         return x
 
 
@@ -290,11 +337,13 @@ class GPT(nn.Module):
         padded_vocab = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab != config.vocab_size:
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab}")
+        depth_scale = 1.0 / config.n_layer if config.completep else 1.0
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab, config.n_embd),
-            "h": nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
+            "h": nn.ModuleList([Block(config, i, depth_scale=depth_scale) for i in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, padded_vocab, bias=False)
+        self.output_multiplier = config.mup_base_width / config.n_embd if config.completep else 1.0
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
@@ -373,18 +422,47 @@ class GPT(nn.Module):
         x0_params = [self.x0_lambdas]
         skip_params = [self.skip_weights]
 
-        param_groups = [
-            dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
-            dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
-            dict(kind='adamw', params=ve_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
-            dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
-        ]
-        for shape in sorted({p.shape for p in matrix_params}):
-            group_params = [p for p in matrix_params if p.shape == shape]
-            param_groups.append(dict(kind='muon', params=group_params, lr=MATRIX_LR,
-                                     momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=WEIGHT_DECAY))
+        if self.config.optimizer == 'adamw':
+            # Pure AdamW: AdamW for everything including matrix params
+            # muP width scaling: scale matrix LR inversely with width
+            matrix_lr = MATRIX_LR * (self.config.mup_base_width / self.config.n_embd) if self.config.completep else MATRIX_LR
+            param_groups = [
+                dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=ve_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=matrix_params, lr=matrix_lr, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+            ]
+        elif self.config.optimizer == 'muon':
+            # Pure Muon: Muon for everything (matrix params, embeddings, LM head)
+            # Scalars still use AdamW (Muon requires 2D+ tensors for orthogonalization)
+            all_muon_params = matrix_params + list(self.transformer.wte.parameters()) + list(self.lm_head.parameters())
+            param_groups = [
+                dict(kind='adamw', params=ve_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+            ]
+            for shape in sorted({p.shape for p in all_muon_params}):
+                group_params = [p for p in all_muon_params if p.shape == shape]
+                param_groups.append(dict(kind='muon', params=group_params, lr=MATRIX_LR,
+                                         momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=WEIGHT_DECAY))
+        else:
+            # Hybrid (default): Muon for matrix params, AdamW for embeddings/scalars/LM-head
+            param_groups = [
+                dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=ve_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
+            ]
+            for shape in sorted({p.shape for p in matrix_params}):
+                group_params = [p for p in matrix_params if p.shape == shape]
+                param_groups.append(dict(kind='muon', params=group_params, lr=MATRIX_LR,
+                                         momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=WEIGHT_DECAY))
 
         optimizer = DistMuonAdamW(param_groups)
         for group in optimizer.param_groups:
@@ -444,6 +522,7 @@ class GPT(nn.Module):
 
         x = norm(x)
         logits = self.lm_head(x)[..., :self.config.vocab_size].float()
+        logits = logits * self.output_multiplier
         logits = 15 * torch.tanh(logits / 15)
         if targets is not None:
             if loss_reduction == 'none':
@@ -469,9 +548,10 @@ polar_express_coeffs = [
 
 @torch.compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+    dtype = p.dtype
     p.mul_(1 - lr_t * wd_t)
-    exp_avg.lerp_(grad, 1 - beta1_t)
-    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
+    exp_avg.lerp_(grad, (1 - beta1_t).to(dtype))
+    exp_avg_sq.lerp_(grad.square(), (1 - beta2_t).to(dtype))
     bias1 = 1 - beta1_t ** step_t
     bias2 = 1 - beta2_t ** step_t
     p.add_(exp_avg / ((exp_avg_sq / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
@@ -480,8 +560,8 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     momentum = momentum_t.to(stacked_grads.dtype)
-    momentum_buffer.lerp_(stacked_grads, 1 - momentum)
-    g = stacked_grads.lerp_(momentum_buffer, momentum)
+    momentum_buffer.lerp_(stacked_grads, (1 - momentum).to(momentum_buffer.dtype))
+    g = stacked_grads.lerp_(momentum_buffer, momentum.to(stacked_grads.dtype))
     X = g.bfloat16()
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     if g.size(-2) > g.size(-1):
@@ -498,7 +578,7 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     red_dim_size = g.size(red_dim)
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
     v_norm = v_norm_sq.sqrt()
-    second_momentum_buffer.lerp_(v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2)
+    second_momentum_buffer.lerp_(v_mean.to(dtype=second_momentum_buffer.dtype), (1 - beta2).to(second_momentum_buffer.dtype))
     step_size = second_momentum_buffer.clamp_min(1e-10).rsqrt()
     scaled_sq_sum = (v_mean * red_dim_size) * step_size.float().square()
     v_norm_new = scaled_sq_sum.sum(dim=(-2, -1), keepdim=True).sqrt()
@@ -637,7 +717,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
 class DataLoader:
     """Pre-tokenized chunk dataloader with per-epoch shuffling."""
 
-    def __init__(self, filepath, B, T, device="cuda", seed=42):
+    def __init__(self, filepath, B, T, device="cuda", seed=42, quiet=False):
         data = torch.load(filepath, weights_only=True)
         chunks = data['chunks']
         valid_counts = data['valid_counts']
@@ -665,6 +745,7 @@ class DataLoader:
         self.total_tokens = usable * T
         self.device = device
         self.seed = seed
+        self.quiet = quiet
         self.pos = 0
         self.epoch = 1
         self._shuffle_and_shard()
@@ -686,7 +767,8 @@ class DataLoader:
         if self.pos >= self.num_steps:
             self.pos = 0
             self.epoch += 1
-            print0(f"Starting epoch {self.epoch}")
+            if not self.quiet:
+                print0(f"Starting epoch {self.epoch}")
             self._shuffle_and_shard()  # reshuffle for new epoch
         batch = self.rank_data[self.pos].to(self.device, non_blocking=True)
         self.pos += 1
@@ -727,15 +809,16 @@ def evaluate_bpb(model, batches, steps, token_bytes):
 
 
 @torch.no_grad()
-def evaluate_ensemble_bpb(checkpoint_paths, config, token_bytes, device, autocast_ctx):
+def evaluate_ensemble_bpb(checkpoint_paths, config, token_bytes, device, autocast_ctx,
+                          mode="prob"):
     """
-    Compute ensemble val loss by averaging probabilities across all checkpoints.
+    Compute ensemble val loss by averaging across all checkpoints.
 
-    For N models, the ensemble prediction is: mean(softmax(logits_1), ..., softmax(logits_N))
-    Loss is computed as -log(avg_prob[target]).
+    mode="prob":  mean(softmax(logits_i))       -> loss = -log(avg_prob[target])
+    mode="logit": softmax(mean(logits_i))       -> loss = cross_entropy(avg_logits, target)
     """
     num_models = len(checkpoint_paths)
-    print0(f"  Loading {num_models} model(s) into GPU memory...")
+    print0(f"  Loading {num_models} model(s) into GPU memory... (ensemble mode: {mode})")
 
     # Load all models onto GPU
     ensemble_models = []
@@ -755,7 +838,7 @@ def evaluate_ensemble_bpb(checkpoint_paths, config, token_bytes, device, autocas
     B_ensemble = 1
     val_loader = DataLoader(
         args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt"),
-        B_ensemble, MAX_SEQ_LEN, device=device, seed=0,
+        B_ensemble, MAX_SEQ_LEN, device=device, seed=0, quiet=True,
     )
     _, _, _, ddp_world_size = get_dist_info()
     ensemble_eval_steps = EVAL_TOKENS // (B_ensemble * MAX_SEQ_LEN * ddp_world_size)
@@ -769,29 +852,41 @@ def evaluate_ensemble_bpb(checkpoint_paths, config, token_bytes, device, autocas
     for _ in range(ensemble_eval_steps):
         x, y, _ = next(batch_iter)
         flat_y = y.view(-1)
-
-        # Average target probabilities across all models
-        target_prob_sum = torch.zeros(flat_y.size(0), dtype=torch.float64, device=device)
-        for model in ensemble_models:
-            with autocast_ctx:
-                logits = model.forward_logits(x).float()
-            probs = F.softmax(logits.view(-1, logits.size(-1)), dim=-1)
-            target_prob_sum += probs.gather(1, flat_y.clamp(min=0).unsqueeze(-1)).squeeze(-1).double()
-            del logits, probs
-        avg_prob = target_prob_sum / num_models
-
-        # Compute loss as -log(avg_prob)
-        loss_per_pos = -torch.log(avg_prob + 1e-10)
-
         mask = flat_y != -1
-        total_loss += loss_per_pos[mask].sum()
+
+        if mode == "logit":
+            # Average raw logits, then compute loss
+            logit_sum = None
+            for model in ensemble_models:
+                with autocast_ctx:
+                    logits = model.forward_logits(x).float()
+                flat_logits = logits.view(-1, logits.size(-1))
+                if logit_sum is None:
+                    logit_sum = torch.zeros_like(flat_logits)
+                logit_sum += flat_logits
+                del logits, flat_logits
+            avg_logits = logit_sum / num_models
+            loss_per_pos = F.cross_entropy(avg_logits, flat_y.clamp(min=0), reduction='none')
+            del logit_sum, avg_logits
+        else:
+            # Average probabilities, then compute loss
+            target_prob_sum = torch.zeros(flat_y.size(0), dtype=torch.float64, device=device)
+            for model in ensemble_models:
+                with autocast_ctx:
+                    logits = model.forward_logits(x).float()
+                probs = F.softmax(logits.view(-1, logits.size(-1)), dim=-1)
+                target_prob_sum += probs.gather(1, flat_y.clamp(min=0).unsqueeze(-1)).squeeze(-1).double()
+                del logits, probs
+            avg_prob = target_prob_sum / num_models
+            loss_per_pos = -torch.log(avg_prob + 1e-10)
+            del target_prob_sum, avg_prob
+
+        total_loss += loss_per_pos[mask].sum().double()
         total_tokens += mask.sum()
 
         num_bytes2d = token_bytes[flat_y.clamp(min=0)]
-        total_nats += (loss_per_pos[mask] * (num_bytes2d[mask] > 0).double()).sum()
+        total_nats += (loss_per_pos[mask].double() * (num_bytes2d[mask] > 0).double()).sum()
         total_bytes += num_bytes2d[mask].sum()
-
-        del target_prob_sum, avg_prob
 
     # Cleanup all models
     del ensemble_models
@@ -915,7 +1010,7 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
     orig_model = model
 
     # Compile
-    compiled_model = torch.compile(model, dynamic=False)
+    compiled_model = model if args.no_compile else torch.compile(model, dynamic=False)
 
 
     # Optimizer
@@ -923,7 +1018,10 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 
     # Dataloaders
     _train_path = args.input_bin if args.input_bin else os.path.join(DATA_DIR, "fineweb_train.pt")
-    train_loader = DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=seed)
+    # init_shuffle: each model sees different data order (default, current behavior)
+    # init: all models see same data order, only model inits differ
+    data_seed = seed if args.ensemble_type == "init_shuffle" else 42
+    train_loader = DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=data_seed)
     x, y, current_epoch = next(train_loader)
 
     # Training config
@@ -972,12 +1070,15 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 
     # Training loop
     step = 0
+    epoch_step = 0  # step within current epoch (resets each epoch)
     min_val_bpb = float("inf")
     min_val_loss = float("inf")
     epochs_without_improvement = 0
     smooth_train_loss = 0
     smooth_train_hard_loss = 0  # EMA for hard CE component
     smooth_train_kl_loss = 0    # EMA for KL distillation component
+    epoch_loss_sum = 0.0   # accumulator for per-epoch mean train loss
+    epoch_loss_count = 0
     total_training_time = 0
     eval_steps = EVAL_TOKENS // (args.device_batch_size * MAX_SEQ_LEN * ddp_world_size)
 
@@ -998,14 +1099,14 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
         if not dupe_active and current_epoch >= dupe_start_epoch:
             print0(f"\n  [model {model_idx+1}] === Enabling dupe-layers at epoch {current_epoch} ===")
             orig_model.set_dupe_layers(args.dupe_layers_start, args.dupe_layers_end)
-            compiled_model = torch.compile(orig_model, dynamic=False)
+            compiled_model = orig_model if args.no_compile else torch.compile(orig_model, dynamic=False)
             dupe_active = True
             gc.enable(); gc.collect()
 
             if model_idx >= 1:
                 print0(f"  [model {model_idx+1}] Switching to dupe batch size {dupe_device_batch_size} "
                     f"(grad_accum_steps: {grad_accum_steps} -> {dupe_grad_accum_steps})")
-                train_loader = DataLoader(_train_path, dupe_device_batch_size, MAX_SEQ_LEN, device=device, seed=seed)
+                train_loader = DataLoader(_train_path, dupe_device_batch_size, MAX_SEQ_LEN, device=device, seed=data_seed)
                 train_loader.epoch = current_epoch
                 train_loader._shuffle_and_shard()
                 x, y, current_epoch = next(train_loader)
@@ -1066,6 +1167,9 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
         toks_per_sec = TOTAL_BATCH_SIZE / dt
 
         step += 1
+        epoch_step += 1
+        epoch_loss_sum += train_loss_f
+        epoch_loss_count += 1
 
         # EMA update (every 10 steps to minimize CPU copy overhead)
         if ema_decays and step >= ema_start_step and step % 10 == 0:
@@ -1079,7 +1183,7 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
         # Logging
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f
-        debiased = smooth_train_loss / (1 - ema_beta**step)
+        debiased = smooth_train_loss / (1 - ema_beta**epoch_step)
         pct = 100 * step / num_iterations
         if step > 10:
             total_training_time += dt
@@ -1090,6 +1194,10 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
         log_dict = {
             "step": step,
             f"model_{model_idx+1}/train_loss": debiased,
+            f"model_{model_idx+1}/train_loss_raw": train_loss_f,
+            f"model_{model_idx+1}/epoch": current_epoch,
+            f"model_{model_idx+1}/epoch_step": epoch_step,
+            f"model_{model_idx+1}/tokens_seen": (current_epoch - 1) * TOKENS_PER_EPOCH + epoch_step * TOTAL_BATCH_SIZE,
             "model_idx": model_idx,
             "tokens_per_sec": toks_per_sec,
         }
@@ -1113,24 +1221,31 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 
         # Epoch boundary: evaluate
         if epoch != current_epoch:
+            # Compute per-epoch mean train loss before resetting
+            epoch_mean_train_loss = epoch_loss_sum / epoch_loss_count if epoch_loss_count > 0 else 0.0
+            print0(f"  [model {model_idx+1}] Epoch {current_epoch} | Mean Train Loss: {epoch_mean_train_loss:.6f} ({epoch_loss_count} steps)")
+
             compiled_model.eval()
             _val_path = args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt")
 
             # Standard CE val metrics
-            val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0)
+            val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0, quiet=True)
             with autocast_ctx:
                 val_bpb, val_loss = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
             print0(f"  [model {model_idx+1}] Epoch {current_epoch} | Val BPB: {val_bpb:.6f} | Val Loss: {val_loss:.6f}")
 
             log_dict = {
                 "step": step,
+                f"model_{model_idx+1}/epoch": current_epoch,
+                f"model_{model_idx+1}/tokens_seen": (current_epoch) * TOKENS_PER_EPOCH,
+                f"model_{model_idx+1}/epoch_mean_train_loss": epoch_mean_train_loss,
                 f"model_{model_idx+1}/val_bpb": val_bpb,
                 f"model_{model_idx+1}/val_loss": val_loss,
             }
 
             # Distillation val metrics (only when a teacher is present)
             if teacher_models:
-                val_loader2 = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0)
+                val_loader2 = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0, quiet=True)
                 val_kl, val_combined, teacher_val_ce = evaluate_distill_val(
                     student=compiled_model,
                     teacher=teacher_models[0],
@@ -1161,6 +1276,11 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
                     break
             compiled_model.train()
             current_epoch = epoch
+            # Reset per-epoch trackers
+            epoch_step = 0
+            epoch_loss_sum = 0.0
+            epoch_loss_count = 0
+            smooth_train_loss = 0  # reset EMA so it doesn't bleed across epochs
 
         if step == 1:
             gc.collect(); gc.freeze(); gc.disable()
@@ -1194,10 +1314,10 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
             for name in final_weights
         }
         load_state_dict_into_model(orig_model, blended_weights)
-        blend_model = torch.compile(orig_model, dynamic=False)
+        blend_model = orig_model if args.no_compile else torch.compile(orig_model, dynamic=False)
         blend_model.eval()
         _val_path = args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt")
-        val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0)
+        val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0, quiet=True)
         with autocast_ctx:
             blend_bpb, blend_loss = evaluate_bpb(blend_model, val_loader, eval_steps, token_bytes)
         print0(f"  [model {model_idx+1}] Blend({alpha:.1f}*final+{1-alpha:.1f}*EMA {ema.decay}): Val BPB: {blend_bpb:.6f} | Val Loss: {blend_loss:.6f}")
@@ -1261,11 +1381,13 @@ def main():
     device_type = device.type
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
-    # FA3 status
+    # Flash Attention status
     if _fa3 is not None:
         print0("Using Flash Attention 3 (Hopper GPU detected)")
+    elif _fa2 is not None:
+        print0("Using Flash Attention 2 (FA3 not available)")
     else:
-        raise RuntimeError("Flash Attention 3 is required but not available. A Hopper (sm90) GPU is needed.")
+        print0("Using PyTorch SDPA fallback (no FA3/FA2 available; sliding window attention disabled)")
 
     # wandb + run_id
     if args.resume:
@@ -1282,7 +1404,13 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     run_name = args.run if args.run else f"ensemble_{run_id}"
-    _wandb_kwargs = {"project": "slowrun", "name": run_name}
+    _wandb_kwargs = {"project": "slowrun", "name": run_name,
+                     "config": {"optimizer": args.optimizer, "completep": args.completep,
+                                "ensemble_type": args.ensemble_type, "ensemble_mode": args.ensemble_mode,
+                                "mup_base_width": args.mup_base_width,
+                                "n_layer": DEPTH, "n_embd": N_EMBD, "n_head": N_HEAD,
+                                "num_models": args.num_models, "num_epochs": args.num_epochs,
+                                "dropout": args.dropout, "weight_decay": WEIGHT_DECAY}}
     if args.wandb_group:
         _wandb_kwargs["group"] = args.wandb_group
     wandb_run = DummyWandb() if not master_process else wandb.init(**_wandb_kwargs)
@@ -1299,7 +1427,9 @@ def main():
             token_bytes_list.append(len(encoder.decode_single_token_bytes(i)))
     token_bytes = torch.tensor(token_bytes_list, dtype=torch.int32, device=device)
 
-    config = GPTConfig(vocab_size=vocab_size, dropout=args.dropout)
+    config = GPTConfig(vocab_size=vocab_size, dropout=args.dropout,
+                       completep=args.completep, mup_base_width=args.mup_base_width,
+                       optimizer=args.optimizer)
 
     # Print config
     print0(f"\n{'='*60}")
@@ -1311,6 +1441,9 @@ def main():
     print0(f"  num_epochs_model_0={args.num_epochs_model_0}")
     print0(f"  dupe_layers={args.dupe_layers_start}-{args.dupe_layers_end} (last {100*(1-args.dupe_fraction):.0f}% of epochs)")
     print0(f"  ema_decays={args.ema_decays}, ema_start_frac={args.ema_start_frac}")
+    print0(f"  optimizer={args.optimizer}, ensemble_type={args.ensemble_type}, ensemble_mode={args.ensemble_mode}")
+    if args.completep:
+        print0(f"  completep=True, mup_base_width={args.mup_base_width}, depth_scale={1.0/DEPTH:.4f}, output_mult={args.mup_base_width/N_EMBD:.4f}")
     print0(f"  checkpoint_dir={checkpoint_dir}")
     print0(f"{'='*60}")
 
@@ -1352,7 +1485,7 @@ def main():
 
     for model_idx in range(resume_from, args.num_models):
         # Chain distillation: only the immediately preceding model is the teacher
-        last_ckpt = [checkpoint_paths[-1]] if checkpoint_paths else []
+        last_ckpt = [] if args.no_distill else ([checkpoint_paths[-1]] if checkpoint_paths else [])
         _num_epochs = (args.num_epochs_model_0 or args.num_epochs) if model_idx == 0 else args.num_epochs
         print0(f"Training model {model_idx + 1} with {_num_epochs} epochs")
         ckpt_path, best_bpb, best_loss = train_single_model(
@@ -1385,6 +1518,7 @@ def main():
             token_bytes=token_bytes,
             device=device,
             autocast_ctx=autocast_ctx,
+            mode=args.ensemble_mode,
         )
 
         ensemble_results.append({"num_models": num_models_so_far, "ensemble_bpb": ens_bpb, "ensemble_loss": ens_loss})
@@ -1408,6 +1542,7 @@ def main():
                 token_bytes=token_bytes,
                 device=device,
                 autocast_ctx=autocast_ctx,
+                mode=args.ensemble_mode,
             )
             num_no_first = len(checkpoint_paths) - 1
             print0(f"Ensemble excl. model 0 ({num_no_first} models) | Val BPB: {ens_nf_bpb:.6f} | Val Loss: {ens_nf_loss:.6f}")
@@ -1417,11 +1552,11 @@ def main():
                 "ensemble_no_first/val_loss": ens_nf_loss,
             })
 
-    # Final ensemble evaluation: last 7 models (prob averaging)
+    # Final ensemble evaluation: last 7 models
     max_ensemble_gpu = 7
     final_paths = checkpoint_paths[-max_ensemble_gpu:]
     print0(f"\n{'='*60}")
-    print0(f"Final ensemble eval: last {len(final_paths)} models (prob averaging)")
+    print0(f"Final ensemble eval: last {len(final_paths)} models ({args.ensemble_mode} averaging)")
     print0(f"{'='*60}")
     final_bpb, final_loss = evaluate_ensemble_bpb(
         checkpoint_paths=final_paths,
@@ -1429,6 +1564,7 @@ def main():
         token_bytes=token_bytes,
         device=device,
         autocast_ctx=autocast_ctx,
+        mode=args.ensemble_mode,
     )
     print0(f"  Val BPB: {final_bpb:.6f} | Val Loss: {final_loss:.6f}")
 
