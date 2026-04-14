@@ -94,7 +94,13 @@ parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
                     help="'init' = different model inits, same data order; "
                          "'init_shuffle' = different inits AND data orders (default)")
 parser.add_argument("--no-compile", action="store_true", default=False,
-                    help="Disable torch.compile (use eager mode; needed when Triton/Python.h unavailable)")
+                    help="(deprecated alias for --compile-mode=eager) Disable torch.compile.")
+parser.add_argument("--compile-mode", type=str, default="eager",
+                    choices=["eager", "aot_eager", "inductor"],
+                    help="Compile backend: 'eager' = no compile (default, safest), "
+                         "'aot_eager' = AOT autograd without inductor (~1.2x speedup, very stable), "
+                         "'inductor' = full torch.compile with inductor (~2x speedup, but hits "
+                         "torch 2.8 dtype bugs in our model — use only if you've verified it works).")
 parser.add_argument("--no-distill", action="store_true", default=False,
                     help="Disable chain distillation; each model trains independently on hard labels only")
 parser.add_argument("--data-fraction", type=float, default=1.0,
@@ -102,12 +108,31 @@ parser.add_argument("--data-fraction", type=float, default=1.0,
 parser.add_argument("--val-every-n-steps", type=int, default=0,
                     help="If >0, run val eval (individual + ensemble) every N outer training steps. "
                          "Default 0 = only at epoch boundaries. Expensive when small.")
+parser.add_argument("--single-model-idx", type=int, default=None,
+                    help="For parallel-training mode: train only the i-th model of an N-model "
+                         "ensemble in this job. Seeds/data are computed as if in a full ensemble. "
+                         "Skips ensemble eval (would only have 1 model); saves per-epoch "
+                         "checkpoints to checkpoints/<run_id>/model_{i}_epoch_{k}.pt for later replay.")
 args = parser.parse_args()
 
 assert 0.0 < args.data_fraction <= 1.0, "--data-fraction must be in (0, 1]"
 
+# Reconcile --no-compile (deprecated) with --compile-mode
 if args.no_compile:
+    args.compile_mode = "eager"
+
+if args.compile_mode == "eager":
     torch._dynamo.config.disable = True
+
+
+def maybe_compile(model):
+    """Wrap model per --compile-mode. Returns the model itself for 'eager'."""
+    if args.compile_mode == "eager":
+        return model
+    elif args.compile_mode == "aot_eager":
+        return torch.compile(model, backend="aot_eager", dynamic=False)
+    else:  # inductor
+        return torch.compile(model, dynamic=False)
 
 # Workaround for torch 2.8 inductor dtype bug in pad_mm benchmark pass
 import torch._inductor.config as _inductor_config
@@ -1100,7 +1125,7 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
     orig_model = model
 
     # Compile
-    compiled_model = model if args.no_compile else torch.compile(model, dynamic=False)
+    compiled_model = maybe_compile(model)
 
 
     # Optimizer
@@ -1189,7 +1214,7 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
         if not dupe_active and current_epoch >= dupe_start_epoch:
             print0(f"\n  [model {model_idx+1}] === Enabling dupe-layers at epoch {current_epoch} ===")
             orig_model.set_dupe_layers(args.dupe_layers_start, args.dupe_layers_end)
-            compiled_model = orig_model if args.no_compile else torch.compile(orig_model, dynamic=False)
+            compiled_model = maybe_compile(orig_model)
             dupe_active = True
             gc.enable(); gc.collect()
 
@@ -1404,7 +1429,7 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
             for name in final_weights
         }
         load_state_dict_into_model(orig_model, blended_weights)
-        blend_model = orig_model if args.no_compile else torch.compile(orig_model, dynamic=False)
+        blend_model = maybe_compile(orig_model)
         blend_model.eval()
         _val_path = args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt")
         val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN, device=device, seed=0, quiet=True)
@@ -1457,37 +1482,44 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 
 def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                         wandb_run, ddp, ddp_world_size, checkpoint_dir,
-                        num_epochs, ensemble_type, ensemble_mode):
+                        num_epochs, ensemble_type, ensemble_mode,
+                        single_model_idx=None):
     """Train N models in synchronized epoch-by-epoch fashion.
 
-    Each epoch: train each model for 1 epoch, then evaluate all models individually
-    and as an ensemble. Per-epoch checkpoints saved for every model.
-
-    Logs to wandb:
-      Per-step:  model_{i}/train_loss_raw, model_{i}/epoch, model_{i}/epoch_step,
-                 model_{i}/tokens_seen, step_global
-      Per-epoch: model_{i}/val_loss, model_{i}/val_bpb,
-                 model_{i}/epoch_mean_train_loss,
-                 ens/val_loss, ens/val_bpb, ens/num_models, epoch
+    If single_model_idx is set, only train/eval that one model (used for parallel
+    training). Ensemble eval is skipped in single-model mode (one model alone).
+    Checkpoints still named model_{idx}_epoch_{k}.pt so replay can assemble later.
     """
     N = len(seeds)
     master_process = (int(os.environ.get('RANK', 0)) == 0)
     synchronize = torch.cuda.synchronize if device.type == "cuda" else lambda: None
 
-    print0(f"\n{'='*60}")
-    print0(f"Synchronized ensemble training: {N} models × {num_epochs} epochs")
-    print0(f"  ensemble_type={ensemble_type}, ensemble_mode={ensemble_mode}")
-    print0(f"{'='*60}")
+    single_mode = single_model_idx is not None
+    if single_mode:
+        assert 0 <= single_model_idx < N, f"single_model_idx {single_model_idx} out of range [0,{N})"
+        active_indices = [single_model_idx]
+        print0(f"\n{'='*60}")
+        print0(f"Single-model training: model {single_model_idx} of virtual {N}-model ensemble × {num_epochs} epochs")
+        print0(f"  ensemble_type={ensemble_type} (used for seed derivation)")
+        print0(f"{'='*60}")
+    else:
+        active_indices = list(range(N))
+        print0(f"\n{'='*60}")
+        print0(f"Synchronized ensemble training: {N} models × {num_epochs} epochs")
+        print0(f"  ensemble_type={ensemble_type}, ensemble_mode={ensemble_mode}")
+        print0(f"{'='*60}")
 
     _train_path = args.input_bin if args.input_bin else os.path.join(DATA_DIR, "fineweb_train.pt")
     _val_path = args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt")
 
-    # Build all models, optimizers, data loaders
-    models = []           # orig (uncompiled) model references
-    compiled_models = []  # compile-wrapped (or same as orig if --no-compile)
-    optimizers = []
-    loaders = []
-    for i, seed in enumerate(seeds):
+    # Build only the active models (all N in sync mode; just 1 in single mode).
+    # We use sparse lists indexed by original model index for clarity.
+    models = {}           # idx -> orig model
+    compiled_models = {}  # idx -> compiled model (or same as orig if --no-compile)
+    optimizers = {}
+    loaders = {}
+    for i in active_indices:
+        seed = seeds[i]
         torch.manual_seed(seed)
         if device.type == "cuda":
             torch.cuda.manual_seed(seed)
@@ -1495,23 +1527,24 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
             m = GPT(config)
         m.to_empty(device=device)
         m.init_weights()
-        models.append(m)
-        compiled_models.append(m if args.no_compile else torch.compile(m, dynamic=False))
-        optimizers.append(m.setup_optimizer())
+        models[i] = m
+        compiled_models[i] = maybe_compile(m)
+        optimizers[i] = m.setup_optimizer()
         # Cross-epoch shuffle for both modes (differs across epochs):
         #   init         -> π_k   (data_seed shared=42, so all models see the same per-epoch permutation)
         #   init_shuffle -> π_{i,k} (data_seed per-model, independent per (model, epoch))
         data_seed = seed if ensemble_type == "init_shuffle" else 42
-        loaders.append(DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN,
-                                  device=device, seed=data_seed, quiet=True,
-                                  reshuffle_per_epoch=True,
-                                  data_fraction=args.data_fraction))
+        loaders[i] = DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN,
+                                device=device, seed=data_seed, quiet=True,
+                                reshuffle_per_epoch=True,
+                                data_fraction=args.data_fraction)
 
     # Batch and iteration accounting (same for all models since same config)
     tokens_per_fwdbwd = args.device_batch_size * MAX_SEQ_LEN * ddp_world_size
     assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
     grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
-    tokens_per_epoch = loaders[0].total_tokens
+    _first_idx = active_indices[0]
+    tokens_per_epoch = loaders[_first_idx].total_tokens
     num_iterations = round(tokens_per_epoch * num_epochs / TOTAL_BATCH_SIZE)
     steps_per_epoch_optim = round(tokens_per_epoch / TOTAL_BATCH_SIZE)  # optimizer steps per epoch
     print0(f"  grad_accum_steps={grad_accum_steps}, steps_per_epoch_optim={steps_per_epoch_optim}, num_iterations={num_iterations}")
@@ -1525,7 +1558,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
     if int(os.environ.get('RANK', 0)) == 0:
         # Pull learning rates from a freshly-built optimizer's param groups
         lr_groups = []
-        for g in optimizers[0].param_groups:
+        for g in optimizers[_first_idx].param_groups:
             lr_groups.append({
                 "kind": g["kind"],
                 "lr": g["lr"],
@@ -1536,7 +1569,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "num_params": sum(p.numel() for p in g["params"]),
             })
 
-        total_params = sum(p.numel() for p in models[0].parameters())
+        total_params = sum(p.numel() for p in models[_first_idx].parameters())
         total_training_tokens = tokens_per_epoch * num_epochs
 
         train_config = {
@@ -1574,7 +1607,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "max_seq_len": MAX_SEQ_LEN,
                 "ddp_world_size": ddp_world_size,
                 "data_fraction": args.data_fraction,
-                "no_compile": args.no_compile,
+                "compile_mode": args.compile_mode,
             },
             "ensemble": {
                 "type": ensemble_type,
@@ -1640,17 +1673,18 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         m.train()
         return vbpb, vloss
 
-    # Helper: ensemble val eval (loads all N models together)
+    # Helper: ensemble val eval (loads all N models together). Only used in sync mode.
     def _run_ensemble_val(epoch):
         ens_loader = DataLoader(_val_path, ens_eval_B, MAX_SEQ_LEN,
                                 device=device, seed=0, quiet=True)
+        model_list = [models[i] for i in active_indices]
         ebpb, eloss = evaluate_ensemble_in_memory(
-            models, ens_loader, ens_eval_steps, token_bytes,
+            model_list, ens_loader, ens_eval_steps, token_bytes,
             device, autocast_ctx, mode=ensemble_mode)
         wandb_run.log({
             "ens/val_bpb": ebpb,
             "ens/val_loss": eloss,
-            "ens/num_models": N,
+            "ens/num_models": len(active_indices),
             "ens/epoch": epoch,
         }, commit=True)
         return ebpb, eloss
@@ -1665,14 +1699,14 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         # Activate dupe layers (shared across all models) at the configured epoch
         if not dupe_active and epoch >= dupe_start_epoch:
             print0(f"  Enabling dupe-layers {args.dupe_layers_start}-{args.dupe_layers_end} at epoch {epoch}")
-            for i in range(N):
+            for i in active_indices:
                 models[i].set_dupe_layers(args.dupe_layers_start, args.dupe_layers_end)
-                compiled_models[i] = models[i] if args.no_compile else torch.compile(models[i], dynamic=False)
+                compiled_models[i] = maybe_compile(models[i])
             dupe_active = True
 
         # ===== Sequential training: model i trains full epoch, then model i+1 =====
         # Per-step individual val eval happens inline. Ensemble val is only at epoch boundary.
-        for i in range(N):
+        for i in active_indices:
             m = compiled_models[i]
             opt = optimizers[i]
             loader = loaders[i]
@@ -1744,14 +1778,15 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 f"model_{i+1}/epoch": epoch,
             }, commit=True)
 
-        # ===== Epoch-boundary: ensemble val eval (all models now at same epoch) =====
-        ens_bpb, ens_loss = _run_ensemble_val(epoch)
-        print0(f"  [ensemble] epoch {epoch} val_bpb={ens_bpb:.6f} val_loss={ens_loss:.6f}")
-        ensemble_results.append({"epoch": epoch, "val_bpb": ens_bpb, "val_loss": ens_loss})
+        # ===== Epoch-boundary: ensemble val eval (skip if single-model mode) =====
+        if not single_mode:
+            ens_bpb, ens_loss = _run_ensemble_val(epoch)
+            print0(f"  [ensemble] epoch {epoch} val_bpb={ens_bpb:.6f} val_loss={ens_loss:.6f}")
+            ensemble_results.append({"epoch": epoch, "val_bpb": ens_bpb, "val_loss": ens_loss})
 
         # ===== Save per-epoch checkpoints =====
         if master_process:
-            for i in range(N):
+            for i in active_indices:
                 ckpt_path = os.path.join(checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
                 torch.save(models[i].state_dict(), ckpt_path)
             # Save progress summary
@@ -1762,15 +1797,19 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "ensemble_results": ensemble_results,
                 "epochs_completed": epoch,
                 "num_epochs": num_epochs,
+                "single_model_idx": single_model_idx,
+                "active_indices": active_indices,
             }
-            with open(os.path.join(checkpoint_dir, "progress.json"), "w") as f:
+            progress_file = (f"progress_model_{single_model_idx}.json"
+                             if single_mode else "progress.json")
+            with open(os.path.join(checkpoint_dir, progress_file), "w") as f:
                 json.dump(progress, f, indent=2)
         if ddp:
             dist.barrier()
 
         # Switch models back to train mode for next epoch
-        for m in compiled_models:
-            m.train()
+        for i in active_indices:
+            compiled_models[i].train()
 
     return ensemble_results
 
@@ -1829,6 +1868,15 @@ def main():
         _wandb_kwargs["group"] = args.wandb_group
     wandb_run = DummyWandb() if not master_process else wandb.init(**_wandb_kwargs)
 
+    # Tell wandb which step axis each metric family should use (avoids defaulting
+    # to wandb's implicit step counter, which is shared across all log calls).
+    if master_process:
+        for i in range(args.num_models):
+            wandb_run.define_metric(f"model_{i+1}/step")
+            wandb_run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/step")
+        wandb_run.define_metric("ens/epoch")
+        wandb_run.define_metric("ens/*", step_metric="ens/epoch")
+
     # Tokenizer + token_bytes
     encoder = tiktoken.get_encoding("gpt2")
     vocab_size = encoder.n_vocab
@@ -1886,6 +1934,7 @@ def main():
         num_epochs=args.num_epochs,
         ensemble_type=args.ensemble_type,
         ensemble_mode=args.ensemble_mode,
+        single_model_idx=args.single_model_idx,
     )
 
     # Final summary

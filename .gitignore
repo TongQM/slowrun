@@ -8,3 +8,5 @@ tiny_ckpts/
 .conda_env/
 __pycache__/
 data_eff/logs/val_loss.png
+data_eff/logs/*.out
+data_eff/logs/*.err

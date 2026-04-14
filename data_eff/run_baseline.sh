@@ -23,7 +23,7 @@ set -euo pipefail
 
 # --- Environment ---
 module load anaconda3/2024.10-1
-conda activate /ocean/projects/cis260095p/ymiao6/scaling/slowrun/.conda_env
+conda activate slowrun
 
 cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
 
@@ -82,7 +82,7 @@ torchrun \
     --data-fraction=$DATA_FRACTION \
     --val-every-n-steps=10 \
     --num-epochs-model-0=$NUM_EPOCHS \
-    --no-compile \
+    --compile-mode=inductor \
     --run=$RUN_NAME \
     --wandb_group=$WANDB_GROUP
 
