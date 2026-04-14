@@ -15,20 +15,37 @@ We use nanochat as our baseline to compute data efficiency. For each token count
 
 ## Modifications to `unlimited/train.py` (vs upstream slowrun)
 
-### Per-Epoch Tracking
-- `train_loss_raw`: unsmoothed per-step loss logged to wandb
-- `epoch`, `epoch_step`, `tokens_seen`: logged per step for intra-epoch analysis
-- `epoch_mean_train_loss`: arithmetic mean of all step losses in each epoch
-- EMA smoothed loss resets at epoch boundaries (debiasing uses `epoch_step`)
+### Synchronized Ensemble Training (primary change)
+
+Replaces the upstream flow (train model 1 fully, then model 2, etc.) with **synchronized epoch-by-epoch training** of all N models:
+
+1. Build N models in GPU memory at once (different init/data seeds per ensemble-type)
+2. For each epoch: train each model for 1 epoch, then evaluate each model individually, then evaluate the ensemble
+3. Save per-epoch checkpoints: `model_{i}_epoch_{k}.pt` for all i, k
+
+Benefit: per-epoch ensemble validation metrics are logged to wandb **on the fly** during training.
+
+Implemented in `train_ensemble_sync()` + `evaluate_ensemble_in_memory()`. Chain distillation removed from the main flow.
+
+### Per-Step Wandb Tracking
+- `model_{i}/train_loss_raw`: unsmoothed per-step loss
+- `model_{i}/train_loss`: EMA smoothed, resets at epoch boundaries
+- `model_{i}/epoch`, `model_{i}/epoch_step`, `model_{i}/tokens_seen`
+- `step_global`: shared x-axis across all models
+
+### Per-Epoch Ensemble Tracking (wandb)
+- `model_{i}/val_bpb`, `model_{i}/val_loss` — each model's metrics at each epoch
+- `model_{i}/epoch_mean_train_loss` — arithmetic mean train loss per epoch
+- `ens/val_bpb`, `ens/val_loss`, `ens/num_models` — ensemble metrics
+- `epoch` — standalone epoch axis for grouping
 
 ### Ensemble Averaging Mode (`--ensemble-mode {prob,logit}`)
 - `prob` (default): averages `softmax(logits)` across models, loss = `-log(avg_prob)`
 - `logit`: averages raw logits before softmax, loss = `cross_entropy(avg_logits, target)`
-- Applied in `evaluate_ensemble_bpb()` at all 3 call sites
 
 ### Ensemble Type (`--ensemble-type {init,init_shuffle}`)
-- `init_shuffle` (default): each model gets a different seed for both init and data shuffling (original behavior)
-- `init`: models get different init seeds but the same data shuffle seed (42), isolating the effect of init diversity from data order diversity
+- `init`: all models see **identical data in identical order every epoch** (fixed shuffle seed, no per-epoch reshuffling). Only model initialization differs across ensemble members.
+- `init_shuffle`: each model has its own shuffle seed AND reshuffles data every epoch (seed + epoch). Both init and data order diverge across models.
 
 ### CompleteP (`--completep`)
 Enables muP width scaling + 1/L depth scaling:

@@ -6,15 +6,15 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=4:00:00
-#SBATCH --array=0-2
+#SBATCH --time=8:00:00
+#SBATCH --array=0-1
 #SBATCH --output=data_eff/logs/%x_%A_%a.out
 #SBATCH --error=data_eff/logs/%x_%A_%a.err
 #
-# Baseline: 3 ensemble strategies on d12 model (n_layer=12, n_embd=768, n_head=12, ~125M params)
-#   Array 0: no ensemble       (1 model)
-#   Array 1: init ensemble     (5 models, same data order)
-#   Array 2: init+shuffle      (5 models, different data orders)
+# Baseline: 2 ensemble strategies on d12 model (n_layer=12, n_embd=768, n_head=12, ~125M params)
+#   Array 0: init ensemble     (5 models, same data order; model 1 = single-model baseline)
+#   Array 1: init+shuffle      (5 models, different data orders)
+# The no-ensemble baseline comes free as model_1/* in either run (same seed=42, same data).
 #
 # Submit: sbatch data_eff/run_baseline.sh
 #
@@ -40,31 +40,24 @@ N_LAYER=12
 N_HEAD=12
 N_EMBD=768
 NUM_MODELS=5
-NUM_EPOCHS=12
+NUM_EPOCHS=30              # more epochs to study multi-epoch dynamics
+DATA_FRACTION=0.2          # 20M tokens per epoch (20% of 100M)
 OPTIMIZER="hybrid"
 ENSEMBLE_MODE="logit"
-DUPE_START=$((N_LAYER / 2))       # decoder start
-DUPE_END=$((N_LAYER - 2))         # leave last 2 layers unduplicated
-WANDB_GROUP="baseline_d${N_LAYER}_w${N_EMBD}"
+WANDB_GROUP="baseline_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}"
 
 # --- Map array index to ensemble config ---
 case $SLURM_ARRAY_TASK_ID in
     0)
-        RUN_MODELS=1
-        ENSEMBLE_TYPE="init_shuffle"
-        RUN_NAME="${WANDB_GROUP}_no_ensemble"
-        ;;
-    1)
-        RUN_MODELS=$NUM_MODELS
         ENSEMBLE_TYPE="init"
         RUN_NAME="${WANDB_GROUP}_init_ens"
         ;;
-    2)
-        RUN_MODELS=$NUM_MODELS
+    1)
         ENSEMBLE_TYPE="init_shuffle"
         RUN_NAME="${WANDB_GROUP}_init_shuffle_ens"
         ;;
 esac
+RUN_MODELS=$NUM_MODELS
 
 echo "============================================================"
 echo "Job: $SLURM_JOB_NAME (array $SLURM_ARRAY_TASK_ID)"
@@ -86,10 +79,9 @@ torchrun \
     --num-epochs=$NUM_EPOCHS \
     --optimizer=$OPTIMIZER \
     --ensemble-mode=$ENSEMBLE_MODE \
-    --dupe-layers-start=$DUPE_START \
-    --dupe-layers-end=$DUPE_END \
+    --data-fraction=$DATA_FRACTION \
     --num-epochs-model-0=$NUM_EPOCHS \
-    --no-distill \
+    --no-compile \
     --run=$RUN_NAME \
     --wandb_group=$WANDB_GROUP
 

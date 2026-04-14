@@ -74,12 +74,12 @@ parser.add_argument("--dupe-layers-start", type=int, default=15,
                     help="First decoder layer to duplicate (inclusive)")
 parser.add_argument("--dupe-layers-end", type=int, default=25,
                     help="Last decoder layer to duplicate (exclusive)")
-parser.add_argument("--dupe-fraction", type=float, default=0.5, help="Dupe layers activate for the last (1 - this) fraction of epochs") # default is 7/12
+parser.add_argument("--dupe-fraction", type=float, default=1.0, help="Dupe layers activate for the last (1 - this) fraction of epochs. Default 1.0 disables dupe entirely.")
 parser.add_argument("--ema-decays", type=str, default="0.95",
                     help="Comma-separated EMA decay rates, e.g. '0.999,0.9995,0.9998'")
 parser.add_argument("--ema-start-frac", type=float, default=0.90,
                     help="Fraction of training after which to start EMA tracking")
-parser.add_argument("--ensemble-mode", type=str, default="prob", choices=["prob", "logit"],
+parser.add_argument("--ensemble-mode", type=str, default="logit", choices=["prob", "logit"],
                     help="Ensemble averaging method: 'prob' averages softmax probabilities, 'logit' averages raw logits")
 parser.add_argument("--optimizer", type=str, default="hybrid", choices=["hybrid", "muon", "adamw"],
                     help="'hybrid' = Muon for matrices + AdamW for rest (default), "
@@ -97,10 +97,18 @@ parser.add_argument("--no-compile", action="store_true", default=False,
                     help="Disable torch.compile (use eager mode; needed when Triton/Python.h unavailable)")
 parser.add_argument("--no-distill", action="store_true", default=False,
                     help="Disable chain distillation; each model trains independently on hard labels only")
+parser.add_argument("--data-fraction", type=float, default=1.0,
+                    help="Use only this fraction of the training data (0.0, 1.0]. Smaller fraction + more epochs lets you study multi-epoch dynamics faster.")
 args = parser.parse_args()
+
+assert 0.0 < args.data_fraction <= 1.0, "--data-fraction must be in (0, 1]"
 
 if args.no_compile:
     torch._dynamo.config.disable = True
+
+# Workaround for torch 2.8 inductor dtype bug in pad_mm benchmark pass
+import torch._inductor.config as _inductor_config
+_inductor_config.shape_padding = False
 
 if args.output_json and not args.save_result:
     args.save_result = args.output_json
@@ -717,7 +725,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
 class DataLoader:
     """Pre-tokenized chunk dataloader with per-epoch shuffling."""
 
-    def __init__(self, filepath, B, T, device="cuda", seed=42, quiet=False):
+    def __init__(self, filepath, B, T, device="cuda", seed=42, quiet=False, reshuffle_per_epoch=True, data_fraction=1.0):
         data = torch.load(filepath, weights_only=True)
         chunks = data['chunks']
         valid_counts = data['valid_counts']
@@ -730,6 +738,12 @@ class DataLoader:
             rows = chunk.view(file_B, sequence_size)[:vc]
             all_seqs.append(rows)
         all_seqs = torch.cat(all_seqs, dim=0).long()
+
+        # Truncate to `data_fraction` of available data (deterministic: uses first N sequences).
+        # A fixed slice is fine since sequences in the .pt file were already shuffled at prep time.
+        if data_fraction < 1.0:
+            keep = int(len(all_seqs) * data_fraction)
+            all_seqs = all_seqs[:keep]
 
         _, rank, _, world_size = get_dist_info()
         seqs_per_step = B * world_size
@@ -746,6 +760,7 @@ class DataLoader:
         self.device = device
         self.seed = seed
         self.quiet = quiet
+        self.reshuffle_per_epoch = reshuffle_per_epoch
         self.pos = 0
         self.epoch = 1
         self._shuffle_and_shard()
@@ -753,7 +768,10 @@ class DataLoader:
     def _shuffle_and_shard(self):
         """Shuffle all sequences and shard for this rank."""
         g = torch.Generator()
-        g.manual_seed(self.seed + self.epoch)
+        # Fixed shuffle if reshuffle_per_epoch=False; advances per epoch otherwise.
+        # Use multiplicative seeding so (seed_a, epoch_b) is independent from (seed_b, epoch_a).
+        shuffle_seed = self.seed * 10_000 + (self.epoch if self.reshuffle_per_epoch else 0)
+        g.manual_seed(shuffle_seed)
         perm = torch.randperm(len(self.all_seqs), generator=g)
         shuffled = self.all_seqs[perm]
         # Reshape: (num_steps, world_size, B, T+1)
@@ -892,6 +910,75 @@ def evaluate_ensemble_bpb(checkpoint_paths, config, token_bytes, device, autocas
     del ensemble_models
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
+    if dist.is_initialized():
+        dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_tokens, op=dist.ReduceOp.SUM)
+
+    total_nats, total_bytes = total_nats.item(), total_bytes.item()
+    total_loss, total_tokens = total_loss.item(), total_tokens.item()
+    bpb = total_nats / (math.log(2) * total_bytes) if total_bytes > 0 else float('inf')
+    loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
+    return bpb, loss
+
+
+@torch.no_grad()
+def evaluate_ensemble_in_memory(ensemble_models, val_loader, eval_steps, token_bytes,
+                                 device, autocast_ctx, mode="prob"):
+    """Same as evaluate_ensemble_bpb but models are already loaded in memory.
+
+    Args:
+        ensemble_models: list of already-built GPT models (in eval mode)
+        val_loader: iterable yielding (x, y, epoch) batches
+        eval_steps: number of batches to evaluate
+    """
+    num_models = len(ensemble_models)
+    for m in ensemble_models:
+        m.eval()
+
+    total_nats = torch.tensor(0.0, dtype=torch.float64, device=device)
+    total_bytes = torch.tensor(0, dtype=torch.int64, device=device)
+    total_loss = torch.tensor(0.0, dtype=torch.float64, device=device)
+    total_tokens = torch.tensor(0, dtype=torch.int64, device=device)
+
+    batch_iter = iter(val_loader)
+    for _ in range(eval_steps):
+        x, y, _ = next(batch_iter)
+        flat_y = y.view(-1)
+        mask = flat_y != -1
+
+        if mode == "logit":
+            logit_sum = None
+            for m in ensemble_models:
+                with autocast_ctx:
+                    logits = m.forward_logits(x).float()
+                flat_logits = logits.view(-1, logits.size(-1))
+                if logit_sum is None:
+                    logit_sum = torch.zeros_like(flat_logits)
+                logit_sum += flat_logits
+                del logits, flat_logits
+            avg_logits = logit_sum / num_models
+            loss_per_pos = F.cross_entropy(avg_logits, flat_y.clamp(min=0), reduction='none')
+            del logit_sum, avg_logits
+        else:
+            target_prob_sum = torch.zeros(flat_y.size(0), dtype=torch.float64, device=device)
+            for m in ensemble_models:
+                with autocast_ctx:
+                    logits = m.forward_logits(x).float()
+                probs = F.softmax(logits.view(-1, logits.size(-1)), dim=-1)
+                target_prob_sum += probs.gather(1, flat_y.clamp(min=0).unsqueeze(-1)).squeeze(-1).double()
+                del logits, probs
+            avg_prob = target_prob_sum / num_models
+            loss_per_pos = -torch.log(avg_prob + 1e-10)
+            del target_prob_sum, avg_prob
+
+        total_loss += loss_per_pos[mask].sum().double()
+        total_tokens += mask.sum()
+        num_bytes2d = token_bytes[flat_y.clamp(min=0)]
+        total_nats += (loss_per_pos[mask].double() * (num_bytes2d[mask] > 0).double()).sum()
+        total_bytes += num_bytes2d[mask].sum()
 
     if dist.is_initialized():
         dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
@@ -1362,6 +1449,245 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 
 
 # =============================================================================
+# Synchronized ensemble training (our additions)
+# =============================================================================
+
+def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
+                        wandb_run, ddp, ddp_world_size, checkpoint_dir,
+                        num_epochs, ensemble_type, ensemble_mode):
+    """Train N models in synchronized epoch-by-epoch fashion.
+
+    Each epoch: train each model for 1 epoch, then evaluate all models individually
+    and as an ensemble. Per-epoch checkpoints saved for every model.
+
+    Logs to wandb:
+      Per-step:  model_{i}/train_loss_raw, model_{i}/epoch, model_{i}/epoch_step,
+                 model_{i}/tokens_seen, step_global
+      Per-epoch: model_{i}/val_loss, model_{i}/val_bpb,
+                 model_{i}/epoch_mean_train_loss,
+                 ens/val_loss, ens/val_bpb, ens/num_models, epoch
+    """
+    N = len(seeds)
+    master_process = (int(os.environ.get('RANK', 0)) == 0)
+    synchronize = torch.cuda.synchronize if device.type == "cuda" else lambda: None
+
+    print0(f"\n{'='*60}")
+    print0(f"Synchronized ensemble training: {N} models × {num_epochs} epochs")
+    print0(f"  ensemble_type={ensemble_type}, ensemble_mode={ensemble_mode}")
+    print0(f"{'='*60}")
+
+    _train_path = args.input_bin if args.input_bin else os.path.join(DATA_DIR, "fineweb_train.pt")
+    _val_path = args.input_val_bin if args.input_val_bin else os.path.join(DATA_DIR, "fineweb_val.pt")
+
+    # Build all models, optimizers, data loaders
+    models = []           # orig (uncompiled) model references
+    compiled_models = []  # compile-wrapped (or same as orig if --no-compile)
+    optimizers = []
+    loaders = []
+    for i, seed in enumerate(seeds):
+        torch.manual_seed(seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed(seed)
+        with torch.device("meta"):
+            m = GPT(config)
+        m.to_empty(device=device)
+        m.init_weights()
+        models.append(m)
+        compiled_models.append(m if args.no_compile else torch.compile(m, dynamic=False))
+        optimizers.append(m.setup_optimizer())
+        # init: fixed data order (no reshuffling across epochs, identical across models)
+        # init_shuffle: reshuffle each epoch, different sequence per model
+        data_seed = seed if ensemble_type == "init_shuffle" else 42
+        reshuffle = (ensemble_type == "init_shuffle")
+        loaders.append(DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN,
+                                  device=device, seed=data_seed, quiet=True,
+                                  reshuffle_per_epoch=reshuffle,
+                                  data_fraction=args.data_fraction))
+
+    # Batch and iteration accounting (same for all models since same config)
+    tokens_per_fwdbwd = args.device_batch_size * MAX_SEQ_LEN * ddp_world_size
+    assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
+    grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
+    tokens_per_epoch = loaders[0].total_tokens
+    num_iterations = round(tokens_per_epoch * num_epochs / TOTAL_BATCH_SIZE)
+    steps_per_epoch_optim = round(tokens_per_epoch / TOTAL_BATCH_SIZE)  # optimizer steps per epoch
+    print0(f"  grad_accum_steps={grad_accum_steps}, steps_per_epoch_optim={steps_per_epoch_optim}, num_iterations={num_iterations}")
+    print0(f"  tokens_per_epoch={tokens_per_epoch:,}  (data_fraction={args.data_fraction})")
+
+    eval_steps = EVAL_TOKENS // (args.device_batch_size * MAX_SEQ_LEN * ddp_world_size)
+    ens_eval_B = 1
+    ens_eval_steps = EVAL_TOKENS // (ens_eval_B * MAX_SEQ_LEN * ddp_world_size)
+
+    # LR schedule (shared — all models are identical config)
+    def get_lr_multiplier(it):
+        warmup = round(WARMUP_RATIO * num_iterations)
+        warmdown = round(WARMDOWN_RATIO * num_iterations)
+        if it < warmup: return (it + 1) / warmup
+        elif it <= num_iterations - warmdown: return 1.0
+        else:
+            progress = (num_iterations - it) / warmdown
+            return progress + (1 - progress) * FINAL_LR_FRAC
+
+    def get_muon_momentum(it):
+        return (1 - min(it / 300, 1)) * 0.85 + min(it / 300, 1) * 0.95
+
+    # Per-model optim-step counters (each model has its own training progress)
+    per_model_step = [0] * N
+    step_global = 0
+
+    # EMA smoothing per model
+    smooth_train_loss = [0.0] * N
+
+    individual_results = []   # [{"model": i, "seed": s, "per_epoch": [{"epoch": e, "val_loss": .., "val_bpb": ..}, ...]}, ...]
+    ensemble_results = []     # [{"epoch": e, "val_loss": .., "val_bpb": ..}, ...]
+    dupe_active = False
+    dupe_start_epoch = math.ceil(args.dupe_fraction * num_epochs) + 1
+
+    for epoch in range(1, num_epochs + 1):
+        print0(f"\n{'='*60}")
+        print0(f"Epoch {epoch}/{num_epochs}")
+        print0(f"{'='*60}")
+
+        # Activate dupe layers (shared across all models) at the configured epoch
+        if not dupe_active and epoch >= dupe_start_epoch:
+            print0(f"  Enabling dupe-layers {args.dupe_layers_start}-{args.dupe_layers_end} at epoch {epoch}")
+            for i in range(N):
+                models[i].set_dupe_layers(args.dupe_layers_start, args.dupe_layers_end)
+                compiled_models[i] = models[i] if args.no_compile else torch.compile(models[i], dynamic=False)
+            dupe_active = True
+
+        # ===== Train phase: each model for 1 epoch =====
+        for i in range(N):
+            m = compiled_models[i]
+            opt = optimizers[i]
+            loader = loaders[i]
+
+            epoch_loss_sum = 0.0
+            epoch_loss_count = 0
+            m.train()
+
+            # Prime loader with current batch if needed
+            target_epoch = epoch + 1  # loader.epoch starts at 1, increments on rollover; we want to train until loader reports epoch == target
+            # Run until loader rolls over to the next epoch
+            # Process optimizer steps for exactly `steps_per_epoch_optim` iterations
+            for local_opt_step in range(steps_per_epoch_optim):
+                synchronize()
+                t0 = time.time()
+                # Gradient accumulation
+                for ga in range(grad_accum_steps):
+                    x, y, _epoch = next(loader)
+                    with autocast_ctx:
+                        loss = m(x, y)
+                    (loss / grad_accum_steps).backward()
+                    train_loss_f = loss.item()
+                    epoch_loss_sum += train_loss_f
+                    epoch_loss_count += 1
+
+                # Optimizer step
+                global_it = per_model_step[i]
+                lrm = get_lr_multiplier(global_it)
+                for g in opt.param_groups:
+                    g["lr"] = g["initial_lr"] * lrm
+                    if g['kind'] == 'muon':
+                        g["momentum"] = get_muon_momentum(global_it)
+                torch.nn.utils.clip_grad_norm_([p for g in opt.param_groups for p in g['params']], max_norm=1.0)
+                opt.step()
+                m.zero_grad(set_to_none=True)
+                synchronize()
+                dt = time.time() - t0
+                toks_per_sec = TOTAL_BATCH_SIZE / dt
+                per_model_step[i] += 1
+                step_global += 1
+
+                # EMA smoothing (debiased using local_opt_step+1 within this epoch)
+                ema_beta = 0.9
+                smooth_train_loss[i] = ema_beta * smooth_train_loss[i] + (1 - ema_beta) * train_loss_f
+                debiased = smooth_train_loss[i] / (1 - ema_beta ** (local_opt_step + 1))
+
+                if (local_opt_step + 1) % 50 == 0 or local_opt_step == 0:
+                    print0(f"  [epoch {epoch}] [model {i+1}] step {local_opt_step+1}/{steps_per_epoch_optim} "
+                           f"| loss: {debiased:.4f} | {toks_per_sec:.0f} tok/s")
+
+                # Per-model training metrics (only model_{i}/* keys, no shared keys)
+                wandb_run.log({
+                    f"model_{i+1}/train_loss_raw": train_loss_f,
+                    f"model_{i+1}/train_loss": debiased,
+                    f"model_{i+1}/epoch": epoch,
+                    f"model_{i+1}/epoch_step": local_opt_step + 1,
+                    f"model_{i+1}/step": per_model_step[i],  # monotonic per-model x-axis
+                    f"model_{i+1}/tokens_seen": (epoch - 1) * tokens_per_epoch + (local_opt_step + 1) * TOTAL_BATCH_SIZE,
+                }, commit=True)
+
+            # Reset EMA at epoch boundary so it doesn't bleed into next epoch
+            smooth_train_loss[i] = 0.0
+
+            mean_train_loss = epoch_loss_sum / max(1, epoch_loss_count)
+            print0(f"  [model {i+1}] epoch {epoch} mean_train_loss={mean_train_loss:.4f}")
+            # Per-model epoch summary (only model_{i}/* keys)
+            wandb_run.log({
+                f"model_{i+1}/epoch_mean_train_loss": mean_train_loss,
+                f"model_{i+1}/epoch": epoch,
+            }, commit=True)
+
+        # ===== Per-model val phase =====
+        for i in range(N):
+            m = compiled_models[i]
+            m.eval()
+            val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN,
+                                    device=device, seed=0, quiet=True)
+            with autocast_ctx:
+                val_bpb, val_loss = evaluate_bpb(m, val_loader, eval_steps, token_bytes)
+            print0(f"  [model {i+1}] epoch {epoch} val_bpb={val_bpb:.6f} val_loss={val_loss:.6f}")
+            # Per-model val metrics (only model_{i}/* keys)
+            wandb_run.log({
+                f"model_{i+1}/val_bpb": val_bpb,
+                f"model_{i+1}/val_loss": val_loss,
+                f"model_{i+1}/epoch": epoch,
+            }, commit=True)
+
+        # ===== Ensemble val phase =====
+        ens_val_loader = DataLoader(_val_path, ens_eval_B, MAX_SEQ_LEN,
+                                    device=device, seed=0, quiet=True)
+        ens_bpb, ens_loss = evaluate_ensemble_in_memory(
+            models, ens_val_loader, ens_eval_steps, token_bytes,
+            device, autocast_ctx, mode=ensemble_mode)
+        print0(f"  [ensemble] epoch {epoch} val_bpb={ens_bpb:.6f} val_loss={ens_loss:.6f}")
+        # Ensemble metrics (only ens/* keys; epoch as shared x-axis for all models' per-epoch comparison)
+        wandb_run.log({
+            "ens/val_bpb": ens_bpb,
+            "ens/val_loss": ens_loss,
+            "ens/num_models": N,
+            "ens/epoch": epoch,
+        }, commit=True)
+        ensemble_results.append({"epoch": epoch, "val_bpb": ens_bpb, "val_loss": ens_loss})
+
+        # ===== Save per-epoch checkpoints =====
+        if master_process:
+            for i in range(N):
+                ckpt_path = os.path.join(checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
+                torch.save(models[i].state_dict(), ckpt_path)
+            # Save progress summary
+            progress = {
+                "seeds": seeds,
+                "ensemble_type": ensemble_type,
+                "ensemble_mode": ensemble_mode,
+                "ensemble_results": ensemble_results,
+                "epochs_completed": epoch,
+                "num_epochs": num_epochs,
+            }
+            with open(os.path.join(checkpoint_dir, "progress.json"), "w") as f:
+                json.dump(progress, f, indent=2)
+        if ddp:
+            dist.barrier()
+
+        # Switch models back to train mode for next epoch
+        for m in compiled_models:
+            m.train()
+
+    return ensemble_results
+
+
+# =============================================================================
 # Main: train ensemble
 # =============================================================================
 
@@ -1438,9 +1764,11 @@ def main():
     print0(f"  run_id={run_id}  (resume with: --resume {run_id})")
     print0(f"  n_layer={DEPTH}, n_embd={N_EMBD}, n_head={N_HEAD}")
     print0(f"  num_epochs={args.num_epochs}, dropout={args.dropout}")
-    print0(f"  num_epochs_model_0={args.num_epochs_model_0}")
-    print0(f"  dupe_layers={args.dupe_layers_start}-{args.dupe_layers_end} (last {100*(1-args.dupe_fraction):.0f}% of epochs)")
-    print0(f"  ema_decays={args.ema_decays}, ema_start_frac={args.ema_start_frac}")
+    dupe_start = math.ceil(args.dupe_fraction * args.num_epochs) + 1
+    if dupe_start <= args.num_epochs:
+        print0(f"  dupe_layers={args.dupe_layers_start}-{args.dupe_layers_end}, activates at epoch {dupe_start}")
+    else:
+        print0(f"  dupe_layers: disabled (dupe_fraction={args.dupe_fraction})")
     print0(f"  optimizer={args.optimizer}, ensemble_type={args.ensemble_type}, ensemble_mode={args.ensemble_mode}")
     if args.completep:
         print0(f"  completep=True, mup_base_width={args.mup_base_width}, depth_scale={1.0/DEPTH:.4f}, output_mult={args.mup_base_width/N_EMBD:.4f}")
@@ -1450,143 +1778,47 @@ def main():
     # Seeds for each model
     seeds = [42 + i for i in range(args.num_models)]
 
-    # Resume logic: check for existing checkpoints and progress
-    progress_path = os.path.join(checkpoint_dir, "progress.json")
-    checkpoint_paths = []
-    individual_results = []
-    ensemble_results = []
-    resume_from = 0
+    # Resume is not supported in synchronized training mode — progress checkpoints are per-epoch
+    if args.resume:
+        print0("WARNING: --resume is not fully supported in synchronized training mode; starting from epoch 1")
+    if args.distill_alpha != 0.0 and not args.no_distill:
+        print0("NOTE: distillation ignored in synchronized training mode; --distill-alpha has no effect")
 
-    if os.path.exists(progress_path):
-        with open(progress_path, "r") as f:
-            progress = json.load(f)
-        # Validate that all referenced checkpoints still exist
-        for info in progress.get("individual_models", []):
-            ckpt_path = os.path.join(checkpoint_dir, f"model_{info['model'] - 1}.pt")
-            if not os.path.exists(ckpt_path):
-                print0(f"  Checkpoint missing: {ckpt_path}, resuming from model {info['model']}")
-                break
-            checkpoint_paths.append(ckpt_path)
-            individual_results.append(info)
-        ensemble_results = progress.get("ensemble_results", [])[:len(checkpoint_paths)]
-        resume_from = len(checkpoint_paths)
-        if resume_from > 0:
-            print0(f"  Resuming from model {resume_from + 1} ({resume_from} already completed)")
-
-    def save_progress():
-        """Save progress after each model so we can resume."""
-        if master_process:
-            progress = {
-                "individual_models": individual_results,
-                "ensemble_results": ensemble_results,
-            }
-            with open(progress_path, "w") as f:
-                json.dump(progress, f, indent=2)
-
-    for model_idx in range(resume_from, args.num_models):
-        # Chain distillation: only the immediately preceding model is the teacher
-        last_ckpt = [] if args.no_distill else ([checkpoint_paths[-1]] if checkpoint_paths else [])
-        _num_epochs = (args.num_epochs_model_0 or args.num_epochs) if model_idx == 0 else args.num_epochs
-        print0(f"Training model {model_idx + 1} with {_num_epochs} epochs")
-        ckpt_path, best_bpb, best_loss = train_single_model(
-            model_idx=model_idx,
-            seed=seeds[model_idx],
-            device=device,
-            config=config,
-            autocast_ctx=autocast_ctx,
-            token_bytes=token_bytes,
-            wandb_run=wandb_run,
-            ddp=ddp,
-            ddp_world_size=ddp_world_size,
-            checkpoint_dir=checkpoint_dir,
-            num_epochs=_num_epochs,
-            teacher_checkpoint_paths=last_ckpt,
-        )
-        checkpoint_paths.append(ckpt_path)
-        individual_results.append({"model": model_idx + 1, "seed": seeds[model_idx],
-                                    "val_bpb": best_bpb, "val_loss": best_loss})
-
-        # Compute ensemble val loss using last 7 models (7 * ~7GB = ~49GB fits in 80GB GPU)
-        num_models_so_far = model_idx + 1
-        max_ensemble_gpu = 7
-        eval_paths = checkpoint_paths[-max_ensemble_gpu:] if len(checkpoint_paths) > max_ensemble_gpu else checkpoint_paths
-        print0(f"\nEvaluating ensemble of {len(eval_paths)} model(s) (of {num_models_so_far} total)...")
-
-        ens_bpb, ens_loss = evaluate_ensemble_bpb(
-            checkpoint_paths=eval_paths,
-            config=config,
-            token_bytes=token_bytes,
-            device=device,
-            autocast_ctx=autocast_ctx,
-            mode=args.ensemble_mode,
-        )
-
-        ensemble_results.append({"num_models": num_models_so_far, "ensemble_bpb": ens_bpb, "ensemble_loss": ens_loss})
-        print0(f"Ensemble ({num_models_so_far} models) | Val BPB: {ens_bpb:.6f} | Val Loss: {ens_loss:.6f}")
-        wandb_run.log({
-            "ensemble/num_models": num_models_so_far,
-            "ensemble/val_bpb": ens_bpb,
-            "ensemble/val_loss": ens_loss,
-        })
-        save_progress()
-
-        # Ensemble excluding model 0 — this is the reported ensemble metric,
-        # since model 0 (no distillation teacher, fewer epochs) hurts ensemble quality.
-        if len(checkpoint_paths) >= 2:
-            nf_paths = checkpoint_paths[1:]
-            if len(nf_paths) > max_ensemble_gpu:
-                nf_paths = nf_paths[-max_ensemble_gpu:]
-            ens_nf_bpb, ens_nf_loss = evaluate_ensemble_bpb(
-                checkpoint_paths=nf_paths,
-                config=config,
-                token_bytes=token_bytes,
-                device=device,
-                autocast_ctx=autocast_ctx,
-                mode=args.ensemble_mode,
-            )
-            num_no_first = len(checkpoint_paths) - 1
-            print0(f"Ensemble excl. model 0 ({num_no_first} models) | Val BPB: {ens_nf_bpb:.6f} | Val Loss: {ens_nf_loss:.6f}")
-            wandb_run.log({
-                "ensemble_no_first/num_models": num_no_first,
-                "ensemble_no_first/val_bpb": ens_nf_bpb,
-                "ensemble_no_first/val_loss": ens_nf_loss,
-            })
-
-    # Final ensemble evaluation: last 7 models
-    max_ensemble_gpu = 7
-    final_paths = checkpoint_paths[-max_ensemble_gpu:]
-    print0(f"\n{'='*60}")
-    print0(f"Final ensemble eval: last {len(final_paths)} models ({args.ensemble_mode} averaging)")
-    print0(f"{'='*60}")
-    final_bpb, final_loss = evaluate_ensemble_bpb(
-        checkpoint_paths=final_paths,
-        config=config,
-        token_bytes=token_bytes,
+    # Synchronized ensemble training: all N models train epoch-by-epoch together
+    ensemble_results = train_ensemble_sync(
+        seeds=seeds,
         device=device,
+        config=config,
         autocast_ctx=autocast_ctx,
-        mode=args.ensemble_mode,
+        token_bytes=token_bytes,
+        wandb_run=wandb_run,
+        ddp=ddp,
+        ddp_world_size=ddp_world_size,
+        checkpoint_dir=checkpoint_dir,
+        num_epochs=args.num_epochs,
+        ensemble_type=args.ensemble_type,
+        ensemble_mode=args.ensemble_mode,
     )
-    print0(f"  Val BPB: {final_bpb:.6f} | Val Loss: {final_loss:.6f}")
 
     # Final summary
     print0(f"\n{'='*60}")
     print0(f"Ensemble Training Complete")
     print0(f"{'='*60}")
-    print0(f"\nIndividual model results:")
-    for r in individual_results:
-        print0(f"  Model {r['model']} (seed {r['seed']}): BPB={r['val_bpb']:.6f}, Loss={r['val_loss']:.6f}")
-    print0(f"\nRunning ensemble results:")
+    print0(f"\nPer-epoch ensemble results ({args.ensemble_mode} averaging, {args.num_models} models):")
     for r in ensemble_results:
-        print0(f"  Ensemble ({r['num_models']} models): BPB={r['ensemble_bpb']:.6f}, Loss={r['ensemble_loss']:.6f}")
-    print0(f"\n*** Final result (last {len(final_paths)} models, prob avg): BPB={final_bpb:.6f} | Val Loss={final_loss:.6f} ***")
+        print0(f"  Epoch {r['epoch']:3d}: BPB={r['val_bpb']:.6f}, Loss={r['val_loss']:.6f}")
+    if ensemble_results:
+        final = ensemble_results[-1]
+        print0(f"\n*** Final ensemble (epoch {final['epoch']}): BPB={final['val_bpb']:.6f} | Val Loss={final['val_loss']:.6f} ***")
 
     # Save results
     if args.save_result and master_process:
         result = {
-            "individual_models": individual_results,
+            "seeds": seeds,
+            "ensemble_type": args.ensemble_type,
+            "ensemble_mode": args.ensemble_mode,
+            "num_epochs": args.num_epochs,
             "ensemble_results": ensemble_results,
-            "final_ensemble_bpb": final_bpb,
-            "final_ensemble_loss": final_loss,
         }
         with open(args.save_result, "w") as f:
             json.dump(result, f, indent=2)

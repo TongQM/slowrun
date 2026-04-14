@@ -3,3 +3,8 @@ wandb/
 checkpoints/
 logit_avg_ckpts/
 tiny_ckpts/
+.claude/
+.venv/
+.conda_env/
+__pycache__/
+data_eff/logs/
