@@ -53,18 +53,18 @@ parser.add_argument("--patience", type=int, default=-1)
 parser.add_argument("--run", type=str, default=None)
 parser.add_argument("--scalar-lr", type=float, default=0.1)
 parser.add_argument("--matrix-lr", type=float, default=0.04)
-parser.add_argument("--weight-decay", type=float, default=1.3)
+parser.add_argument("--weight-decay", type=float, default=0.1)
 parser.add_argument("--total-batch-size", type=int, default=524288)
 parser.add_argument("--save-result", type=str, default="")
-parser.add_argument("--n_layer", type=int, default=30)
-parser.add_argument("--n_head", type=int, default=16)
-parser.add_argument("--n_embd", type=int, default=2048)
+parser.add_argument("--n_layer", type=int, default=12)
+parser.add_argument("--n_head", type=int, default=12)
+parser.add_argument("--n_embd", type=int, default=768)
 parser.add_argument("--lr_multiplier", type=float, default=0.25)
 parser.add_argument("--input_bin", type=str, default=None)
 parser.add_argument("--input_val_bin", type=str, default=None)
 parser.add_argument("--output_json", type=str, default=None)
 parser.add_argument("--wandb_group", type=str, default=None)
-parser.add_argument("--dropout", type=float, default=0.1)
+parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--num-models", type=int, default=20, help="Number of ensemble members")
 parser.add_argument("--checkpoint-base", type=str, default="checkpoints", help="Base directory for checkpoints")
 parser.add_argument("--resume", type=str, default=None, help="Run ID to resume from (e.g. 20250226_143000)")
@@ -99,6 +99,9 @@ parser.add_argument("--no-distill", action="store_true", default=False,
                     help="Disable chain distillation; each model trains independently on hard labels only")
 parser.add_argument("--data-fraction", type=float, default=1.0,
                     help="Use only this fraction of the training data (0.0, 1.0]. Smaller fraction + more epochs lets you study multi-epoch dynamics faster.")
+parser.add_argument("--val-every-n-steps", type=int, default=0,
+                    help="If >0, run val eval (individual + ensemble) every N outer training steps. "
+                         "Default 0 = only at epoch boundaries. Expensive when small.")
 args = parser.parse_args()
 
 assert 0.0 < args.data_fraction <= 1.0, "--data-fraction must be in (0, 1]"
@@ -1495,13 +1498,13 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         models.append(m)
         compiled_models.append(m if args.no_compile else torch.compile(m, dynamic=False))
         optimizers.append(m.setup_optimizer())
-        # init: fixed data order (no reshuffling across epochs, identical across models)
-        # init_shuffle: reshuffle each epoch, different sequence per model
+        # Cross-epoch shuffle for both modes (differs across epochs):
+        #   init         -> π_k   (data_seed shared=42, so all models see the same per-epoch permutation)
+        #   init_shuffle -> π_{i,k} (data_seed per-model, independent per (model, epoch))
         data_seed = seed if ensemble_type == "init_shuffle" else 42
-        reshuffle = (ensemble_type == "init_shuffle")
         loaders.append(DataLoader(_train_path, args.device_batch_size, MAX_SEQ_LEN,
                                   device=device, seed=data_seed, quiet=True,
-                                  reshuffle_per_epoch=reshuffle,
+                                  reshuffle_per_epoch=True,
                                   data_fraction=args.data_fraction))
 
     # Batch and iteration accounting (same for all models since same config)
@@ -1517,6 +1520,83 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
     eval_steps = EVAL_TOKENS // (args.device_batch_size * MAX_SEQ_LEN * ddp_world_size)
     ens_eval_B = 1
     ens_eval_steps = EVAL_TOKENS // (ens_eval_B * MAX_SEQ_LEN * ddp_world_size)
+
+    # Save full training config (for reproducibility / later analysis)
+    if int(os.environ.get('RANK', 0)) == 0:
+        # Pull learning rates from a freshly-built optimizer's param groups
+        lr_groups = []
+        for g in optimizers[0].param_groups:
+            lr_groups.append({
+                "kind": g["kind"],
+                "lr": g["lr"],
+                "weight_decay": g.get("weight_decay"),
+                "betas": list(g["betas"]) if "betas" in g else None,
+                "momentum": g.get("momentum"),
+                "ns_steps": g.get("ns_steps"),
+                "num_params": sum(p.numel() for p in g["params"]),
+            })
+
+        total_params = sum(p.numel() for p in models[0].parameters())
+        total_training_tokens = tokens_per_epoch * num_epochs
+
+        train_config = {
+            "model": {
+                "n_layer": config.n_layer,
+                "n_head": config.n_head,
+                "n_embd": config.n_embd,
+                "vocab_size": config.vocab_size,
+                "sequence_len": config.sequence_len,
+                "dropout": config.dropout,
+                "completep": config.completep,
+                "mup_base_width": config.mup_base_width,
+                "total_params": total_params,
+            },
+            "optimizer": {
+                "name": args.optimizer,
+                "weight_decay": WEIGHT_DECAY,
+                "lr_multiplier": args.lr_multiplier,
+                "base_matrix_lr": args.matrix_lr,
+                "base_scalar_lr": args.scalar_lr,
+                "warmup_ratio": WARMUP_RATIO,
+                "warmdown_ratio": WARMDOWN_RATIO,
+                "final_lr_frac": FINAL_LR_FRAC,
+                "param_groups": lr_groups,
+            },
+            "training": {
+                "num_epochs": num_epochs,
+                "num_iterations": num_iterations,
+                "steps_per_epoch": steps_per_epoch_optim,
+                "tokens_per_epoch": tokens_per_epoch,
+                "total_training_tokens": total_training_tokens,
+                "total_batch_size": TOTAL_BATCH_SIZE,
+                "device_batch_size": args.device_batch_size,
+                "grad_accum_steps": grad_accum_steps,
+                "max_seq_len": MAX_SEQ_LEN,
+                "ddp_world_size": ddp_world_size,
+                "data_fraction": args.data_fraction,
+                "no_compile": args.no_compile,
+            },
+            "ensemble": {
+                "type": ensemble_type,
+                "mode": ensemble_mode,
+                "num_models": N,
+                "seeds": list(seeds),
+            },
+            "val": {
+                "tokens": EVAL_TOKENS,
+                "every_n_steps": args.val_every_n_steps,
+                "individual_eval_B": args.device_batch_size,
+                "ensemble_eval_B": ens_eval_B,
+            },
+            "data": {
+                "train_path": _train_path,
+                "val_path": _val_path,
+            },
+            "args": vars(args),
+        }
+        with open(os.path.join(checkpoint_dir, "config.json"), "w") as f:
+            json.dump(train_config, f, indent=2, default=str)
+        print0(f"  Saved training config to {checkpoint_dir}/config.json")
 
     # LR schedule (shared — all models are identical config)
     def get_lr_multiplier(it):
@@ -1543,6 +1623,40 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
     dupe_active = False
     dupe_start_epoch = math.ceil(args.dupe_fraction * num_epochs) + 1
 
+    # Helper: individual val eval for ONE model at current training state
+    def _run_individual_val(i, epoch):
+        m = compiled_models[i]
+        m.eval()
+        vl_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN,
+                               device=device, seed=0, quiet=True)
+        with autocast_ctx:
+            vbpb, vloss = evaluate_bpb(m, vl_loader, eval_steps, token_bytes)
+        wandb_run.log({
+            f"model_{i+1}/val_bpb": vbpb,
+            f"model_{i+1}/val_loss": vloss,
+            f"model_{i+1}/epoch": epoch,
+            f"model_{i+1}/step": per_model_step[i],
+        }, commit=True)
+        m.train()
+        return vbpb, vloss
+
+    # Helper: ensemble val eval (loads all N models together)
+    def _run_ensemble_val(epoch):
+        ens_loader = DataLoader(_val_path, ens_eval_B, MAX_SEQ_LEN,
+                                device=device, seed=0, quiet=True)
+        ebpb, eloss = evaluate_ensemble_in_memory(
+            models, ens_loader, ens_eval_steps, token_bytes,
+            device, autocast_ctx, mode=ensemble_mode)
+        wandb_run.log({
+            "ens/val_bpb": ebpb,
+            "ens/val_loss": eloss,
+            "ens/num_models": N,
+            "ens/epoch": epoch,
+        }, commit=True)
+        return ebpb, eloss
+
+    val_every_n = args.val_every_n_steps  # 0 = only at epoch boundaries
+
     for epoch in range(1, num_epochs + 1):
         print0(f"\n{'='*60}")
         print0(f"Epoch {epoch}/{num_epochs}")
@@ -1556,23 +1670,21 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 compiled_models[i] = models[i] if args.no_compile else torch.compile(models[i], dynamic=False)
             dupe_active = True
 
-        # ===== Train phase: each model for 1 epoch =====
+        # ===== Sequential training: model i trains full epoch, then model i+1 =====
+        # Per-step individual val eval happens inline. Ensemble val is only at epoch boundary.
         for i in range(N):
             m = compiled_models[i]
             opt = optimizers[i]
             loader = loaders[i]
 
+            m.train()
             epoch_loss_sum = 0.0
             epoch_loss_count = 0
-            m.train()
 
-            # Prime loader with current batch if needed
-            target_epoch = epoch + 1  # loader.epoch starts at 1, increments on rollover; we want to train until loader reports epoch == target
-            # Run until loader rolls over to the next epoch
-            # Process optimizer steps for exactly `steps_per_epoch_optim` iterations
             for local_opt_step in range(steps_per_epoch_optim):
                 synchronize()
                 t0 = time.time()
+
                 # Gradient accumulation
                 for ga in range(grad_accum_steps):
                     x, y, _epoch = next(loader)
@@ -1599,7 +1711,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 per_model_step[i] += 1
                 step_global += 1
 
-                # EMA smoothing (debiased using local_opt_step+1 within this epoch)
+                # EMA smoothing
                 ema_beta = 0.9
                 smooth_train_loss[i] = ema_beta * smooth_train_loss[i] + (1 - ema_beta) * train_loss_f
                 debiased = smooth_train_loss[i] / (1 - ema_beta ** (local_opt_step + 1))
@@ -1608,57 +1720,33 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                     print0(f"  [epoch {epoch}] [model {i+1}] step {local_opt_step+1}/{steps_per_epoch_optim} "
                            f"| loss: {debiased:.4f} | {toks_per_sec:.0f} tok/s")
 
-                # Per-model training metrics (only model_{i}/* keys, no shared keys)
+                # Per-model training metrics
                 wandb_run.log({
                     f"model_{i+1}/train_loss_raw": train_loss_f,
                     f"model_{i+1}/train_loss": debiased,
                     f"model_{i+1}/epoch": epoch,
                     f"model_{i+1}/epoch_step": local_opt_step + 1,
-                    f"model_{i+1}/step": per_model_step[i],  # monotonic per-model x-axis
+                    f"model_{i+1}/step": per_model_step[i],
                     f"model_{i+1}/tokens_seen": (epoch - 1) * tokens_per_epoch + (local_opt_step + 1) * TOTAL_BATCH_SIZE,
                 }, commit=True)
 
-            # Reset EMA at epoch boundary so it doesn't bleed into next epoch
-            smooth_train_loss[i] = 0.0
+                # Per-N-step individual val eval (cheap, no model-switching)
+                if val_every_n > 0 and (local_opt_step + 1) % val_every_n == 0:
+                    vbpb, vloss = _run_individual_val(i, epoch)
+                    print0(f"    [model {i+1} val @ step {per_model_step[i]}] val_loss={vloss:.4f}")
 
+            # Reset EMA at this model's epoch boundary
+            smooth_train_loss[i] = 0.0
             mean_train_loss = epoch_loss_sum / max(1, epoch_loss_count)
             print0(f"  [model {i+1}] epoch {epoch} mean_train_loss={mean_train_loss:.4f}")
-            # Per-model epoch summary (only model_{i}/* keys)
             wandb_run.log({
                 f"model_{i+1}/epoch_mean_train_loss": mean_train_loss,
                 f"model_{i+1}/epoch": epoch,
             }, commit=True)
 
-        # ===== Per-model val phase =====
-        for i in range(N):
-            m = compiled_models[i]
-            m.eval()
-            val_loader = DataLoader(_val_path, args.device_batch_size, MAX_SEQ_LEN,
-                                    device=device, seed=0, quiet=True)
-            with autocast_ctx:
-                val_bpb, val_loss = evaluate_bpb(m, val_loader, eval_steps, token_bytes)
-            print0(f"  [model {i+1}] epoch {epoch} val_bpb={val_bpb:.6f} val_loss={val_loss:.6f}")
-            # Per-model val metrics (only model_{i}/* keys)
-            wandb_run.log({
-                f"model_{i+1}/val_bpb": val_bpb,
-                f"model_{i+1}/val_loss": val_loss,
-                f"model_{i+1}/epoch": epoch,
-            }, commit=True)
-
-        # ===== Ensemble val phase =====
-        ens_val_loader = DataLoader(_val_path, ens_eval_B, MAX_SEQ_LEN,
-                                    device=device, seed=0, quiet=True)
-        ens_bpb, ens_loss = evaluate_ensemble_in_memory(
-            models, ens_val_loader, ens_eval_steps, token_bytes,
-            device, autocast_ctx, mode=ensemble_mode)
+        # ===== Epoch-boundary: ensemble val eval (all models now at same epoch) =====
+        ens_bpb, ens_loss = _run_ensemble_val(epoch)
         print0(f"  [ensemble] epoch {epoch} val_bpb={ens_bpb:.6f} val_loss={ens_loss:.6f}")
-        # Ensemble metrics (only ens/* keys; epoch as shared x-axis for all models' per-epoch comparison)
-        wandb_run.log({
-            "ens/val_bpb": ens_bpb,
-            "ens/val_loss": ens_loss,
-            "ens/num_models": N,
-            "ens/epoch": epoch,
-        }, commit=True)
         ensemble_results.append({"epoch": epoch, "val_bpb": ens_bpb, "val_loss": ens_loss})
 
         # ===== Save per-epoch checkpoints =====

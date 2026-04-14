@@ -44,8 +44,9 @@ Implemented in `train_ensemble_sync()` + `evaluate_ensemble_in_memory()`. Chain 
 - `logit`: averages raw logits before softmax, loss = `cross_entropy(avg_logits, target)`
 
 ### Ensemble Type (`--ensemble-type {init,init_shuffle}`)
-- `init`: all models see **identical data in identical order every epoch** (fixed shuffle seed, no per-epoch reshuffling). Only model initialization differs across ensemble members.
-- `init_shuffle`: each model has its own shuffle seed AND reshuffles data every epoch (seed + epoch). Both init and data order diverge across models.
+Both modes use cross-epoch shuffling (data order changes per epoch). The difference is whether it's shared across models:
+- `init` → **π_k** (shared schedule): all models use `data_seed=42`, so at epoch k every model sees the same permutation π_k. Different epochs have different permutations. Only model initialization differs across ensemble members.
+- `init_shuffle` → **π_{i,k}** (independent schedules): each model uses `data_seed=42+i` so every (model, epoch) pair has its own unique permutation. Init AND data order diverge across models.
 
 ### CompleteP (`--completep`)
 Enables muP width scaling + 1/L depth scaling:
