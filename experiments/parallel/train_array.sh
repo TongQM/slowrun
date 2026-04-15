@@ -8,23 +8,23 @@
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
 #SBATCH --array=0-9
-#SBATCH --output=data_eff/logs/%x_%A_%a.out
-#SBATCH --error=data_eff/logs/%x_%A_%a.err
+#SBATCH --output=experiments/logs/%x_%A_%a.out
+#SBATCH --error=experiments/logs/%x_%A_%a.err
 #
 # Parallel single-model training: 5 models × 2 ensemble strategies = 10 jobs
 #   Array 0..4: init ensemble        models 0..4
 #   Array 5..9: init+shuffle ensemble models 0..4
 #
 # All 5 jobs of one strategy write to a SHARED checkpoint dir, identified by
-# the env var SHARED_TIMESTAMP (set by data_eff/launch_parallel.sh).
+# the env var SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
 #
-# Submit via: bash data_eff/launch_parallel.sh   (NOT directly with sbatch)
+# Submit via: bash experiments/parallel/launch.sh   (NOT directly with sbatch)
 #
 
 set -euo pipefail
 
 if [ -z "${SHARED_TIMESTAMP:-}" ]; then
-    echo "ERROR: SHARED_TIMESTAMP env var not set. Use data_eff/launch_parallel.sh."
+    echo "ERROR: SHARED_TIMESTAMP env var not set. Use experiments/parallel/launch.sh."
     exit 1
 fi
 
@@ -37,9 +37,9 @@ cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
 if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
     export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
 fi
-mkdir -p data_eff/logs
+mkdir -p experiments/logs
 
-# --- Configuration (must match run_baseline.sh / launch_parallel.sh) ---
+# --- Configuration (must match experiments/sync/run.sh / experiments/parallel/launch.sh) ---
 N_LAYER=12
 N_HEAD=12
 N_EMBD=768

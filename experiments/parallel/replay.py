@@ -7,7 +7,7 @@ Logs `ens/val_loss`, `ens/val_bpb`, `ens/num_models`, `ens/epoch` to wandb,
 matching the schema produced by sync-mode training.
 
 Usage:
-    python data_eff/replay_ensemble_eval.py \
+    python experiments/parallel/replay.py \
         --checkpoint-dir checkpoints/<RUN_ID> \
         --num-models 5 \
         --num-epochs 30 \
@@ -27,7 +27,7 @@ import tiktoken
 
 # Ensure we can import from unlimited/train.py
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))  # experiments/parallel/.. /.. = repo root
 sys.path.insert(0, ROOT)
 
 

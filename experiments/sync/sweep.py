@@ -11,24 +11,24 @@ All runs use CompleteP parametrization (muP width scaling + 1/L depth scaling).
 
 Usage:
     # Single node, 8 GPUs (default)
-    python data_eff/completep.py \
+    python experiments/sync/sweep.py \
         --model-sizes 12:12:768 \
         --num-models 5 --num-epochs 12
 
     # Multiple model sizes (muP width/depth sweep)
-    python data_eff/completep.py \
+    python experiments/sync/sweep.py \
         --model-sizes 12:12:768,20:10:1280,26:14:1792 \
         --num-models 5 --num-epochs 12 \
         --wandb-group completep_sweep
 
     # Multi-node (4 nodes x 8 GPUs = 32 GPUs)
-    python data_eff/completep.py \
+    python experiments/sync/sweep.py \
         --model-sizes 30:16:2048 \
         --launch-prefix "torchrun --nnodes=4 --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=host:29500" \
         --num-models 5
 
     # SLURM cluster
-    python data_eff/completep.py \
+    python experiments/sync/sweep.py \
         --model-sizes 30:16:2048 \
         --launch-prefix "srun torchrun --standalone --nproc_per_node=8" \
         --num-models 5

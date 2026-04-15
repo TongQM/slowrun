@@ -7,6 +7,5 @@ tiny_ckpts/
 .venv/
 .conda_env/
 __pycache__/
-data_eff/logs/val_loss.png
-data_eff/logs/*.out
-data_eff/logs/*.err
+experiments/logs/
+.DS_Store

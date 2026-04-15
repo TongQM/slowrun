@@ -3,7 +3,7 @@
 # Generates a shared timestamp so all training jobs of one strategy share a checkpoint dir.
 #
 # Usage:
-#   bash data_eff/launch_parallel.sh
+#   bash experiments/parallel/launch.sh
 #
 # This will:
 #   1. Create checkpoint directories
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."  # repo root
+cd "$(dirname "$0")/../.."  # repo root
 
 SHARED_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 export SHARED_TIMESTAMP
@@ -28,13 +28,13 @@ for STRATEGY in init_ens init_shuffle_ens; do
     echo "  Created $DIR"
 done
 
-mkdir -p data_eff/logs
+mkdir -p experiments/logs
 
 # Submit training array
 echo
 echo "Submitting training array (10 jobs)..."
 TRAIN_JOB=$(sbatch --parsable --export=ALL,SHARED_TIMESTAMP \
-    data_eff/run_baseline_parallel.sh)
+    experiments/parallel/train_array.sh)
 echo "  Training array job ID: $TRAIN_JOB"
 
 # Submit replay array with dependency
@@ -42,7 +42,7 @@ echo
 echo "Submitting replay array (2 jobs, depends on $TRAIN_JOB)..."
 REPLAY_JOB=$(sbatch --parsable --dependency=afterok:$TRAIN_JOB \
     --export=ALL,SHARED_TIMESTAMP \
-    data_eff/run_replay.sh)
+    experiments/parallel/replay_array.sh)
 echo "  Replay array job ID: $REPLAY_JOB"
 
 echo

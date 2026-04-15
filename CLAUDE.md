@@ -19,13 +19,13 @@ All experiments use `unlimited/train.py` as the training backbone, modified to s
 
 Distillation is removed in our fork — models are fully independent. Checkpoints saved per-epoch for each model.
 
-### Training Parallelism (current: sequential)
+### Training Parallelism — two paths
 
-Within one ensemble strategy (e.g. `init_ens`), the N models train **sequentially on one GPU**: model 0 trains for 1 epoch → model 1 trains for 1 epoch → ... → ensemble eval → next epoch. This is ~Nx slower than true parallel training but keeps the code simple.
+**(a) Synchronized sequential (in-process)** — `train_ensemble_sync` in `unlimited/train.py`. All N models live in GPU memory; within each epoch model 0 trains 1 epoch → model 1 → ... → per-model + ensemble val eval → next epoch. Gives on-the-fly ensemble metrics, ~Nx slower per GPU than true parallel. Launched by `experiments/sync/run.sh` (2-task array: init / init+shuffle) and by `experiments/sync/sweep.py`.
 
-**Parallel SLURM allocation** *does* apply across ensemble strategies: the 3 jobs (no-ensemble, init, init+shuffle) in the job array run on separate GPUs simultaneously.
+**(b) Parallel SLURM + post-hoc replay** — `experiments/parallel/launch.sh`. Submits a 10-task training array via `train_array.sh` (5 models × 2 ensemble strategies, each task trains ONE model with `--num-models 1`) into a shared checkpoint dir keyed by `SHARED_TIMESTAMP`. A 2-task replay array (`replay_array.sh` → `replay.py`) runs with `--dependency=afterok`, loading per-epoch checkpoints and computing ensemble val loss offline. Supports resume.
 
-**When to refactor for parallel training:** when model size grows (e.g. d30, ~1.8B params) and sequential training becomes the bottleneck. The refactor would assign each rank (one per GPU) a different model from the seeds list, disable DDP gradient sync, and gather logits cross-rank for ensemble eval. Non-trivial rewrite — defer until needed.
+**Picking a path:** use (a) for quick iteration and small models; switch to (b) when single-model epoch time × N exceeds a SLURM slot, or when you want to rerun ensemble eval (different `--ensemble-mode`, subset of models) without retraining.
 
 ### Key Experimental Flags (added by us)
 | Flag | Purpose |
@@ -44,17 +44,27 @@ Within one ensemble strategy (e.g. `init_ens`), the N models train **sequentiall
 python prepare_data.py
 ```
 
-**SLURM job array** (3 parallel runs: no ensemble, init ensemble, init+shuffle ensemble):
+**Path (a) — synchronized sync-ensemble** (2-task array: init / init+shuffle):
 ```bash
-sbatch data_eff/run_baseline.sh
+sbatch experiments/sync/run.sh
 ```
 
-**Orchestrator** (multi-size sweeps):
+**Path (b) — parallel single-model training + post-hoc replay**:
 ```bash
-python data_eff/completep.py \
+bash experiments/parallel/launch.sh   # submits training array + replay array with afterok
+```
+
+**Orchestrator** (multi-size sweeps, drives path (a)):
+```bash
+python experiments/sync/sweep.py \
     --model-sizes 12:12:768,20:10:1280,26:14:1792 \
     --num-models 5 --num-epochs 12 \
     --launch-prefix "torchrun --standalone --nproc_per_node=2"
+```
+
+**Plot** ensemble val curves from a finished run:
+```bash
+python experiments/analysis/plot.py   # reads wandb exports
 ```
 
 ### Tracking
@@ -84,19 +94,32 @@ wandb key stored at `/ocean/projects/cis260095p/ymiao6/.wandb_key`.
 
 ## Data Efficiency Metric
 
-For a method's val loss, find the equivalent nanochat baseline token count via piecewise interpolation. Data efficiency = equivalent tokens / actual tokens. Baseline table in `data_eff/README.md`.
+For a method's val loss, find the equivalent nanochat baseline token count via piecewise interpolation. Data efficiency = equivalent tokens / actual tokens. Baseline table in `experiments/README.md`.
 
 ## Codebase Structure
 
-### Our Additions (`data_eff/`)
-- `data_eff/completep.py` — orchestrator: launches multi-size, multi-ensemble experiments
-- `data_eff/run_baseline.sh` — SLURM job array for baseline experiments
-- `data_eff/README.md` — documents all modifications to upstream slowrun
-
-### Upstream (unmodified)
-- `train.py` — limited track (1 hour, single model)
-- `tiny/train.py` — tiny track (15 min)
-- `prepare_data.py` — FineWeb tokenization
+### Repo layout (top level)
+```
+unlimited/train.py     # ensemble training backbone (~2000 lines)
+experiments/           # our orchestration, replay, and analysis (the focus)
+├── sync/              # path (a): synchronized in-process ensemble
+│   ├── run.sh         # 2-task SLURM array (init / init+shuffle)
+│   └── sweep.py       # multi-size, multi-ensemble orchestrator
+├── parallel/          # path (b): parallel single-model + replay
+│   ├── launch.sh      # entrypoint: submits training + replay arrays
+│   ├── train_array.sh # 10-task training array (5 models × 2 strategies)
+│   ├── replay_array.sh# 2-task replay array (depends on training)
+│   └── replay.py      # post-hoc ensemble eval from saved checkpoints
+├── analysis/          # plots and notebooks
+│   └── plot.py
+├── logs/              # SLURM stdout/stderr (gitignored)
+└── README.md          # authoritative spec of our diffs to unlimited/train.py
+prepare_data.py        # FineWeb tokenization (shared)
+legacy/                # upstream benchmark tracks — not the research focus
+├── limited_train.py   # 1-hour single-model track
+├── tiny/              # 15-min track
+└── dev/               # upstream experimental attention variants
+```
 
 ### Architecture (GPT in `unlimited/train.py`)
 - ~1.8B params at default config (d30, n_embd=2048, n_head=16)
@@ -110,7 +133,7 @@ Validation is empirical via training runs comparing val loss/BPB.
 
 ## Key Modifications to `unlimited/train.py`
 
-See `data_eff/README.md` for full details. Summary:
+See `experiments/README.md` for full details. Summary:
 - **Synchronized ensemble training** (`train_ensemble_sync`): all N models live in GPU memory; train epoch-by-epoch; per-epoch ensemble val eval on the fly
 - Per-step wandb logging for each model + per-epoch ensemble metrics (`ens/val_bpb`, `ens/val_loss`)
 - Per-epoch checkpoints saved for every model (`model_{i}_epoch_{k}.pt`)

@@ -8,15 +8,15 @@
 #SBATCH --mem=32G
 #SBATCH --time=8:00:00
 #SBATCH --array=0-1
-#SBATCH --output=data_eff/logs/%x_%A_%a.out
-#SBATCH --error=data_eff/logs/%x_%A_%a.err
+#SBATCH --output=experiments/logs/%x_%A_%a.out
+#SBATCH --error=experiments/logs/%x_%A_%a.err
 #
 # Baseline: 2 ensemble strategies on d12 model (n_layer=12, n_embd=768, n_head=12, ~125M params)
 #   Array 0: init ensemble     (5 models, same data order; model 1 = single-model baseline)
 #   Array 1: init+shuffle      (5 models, different data orders)
 # The no-ensemble baseline comes free as model_1/* in either run (same seed=42, same data).
 #
-# Submit: sbatch data_eff/run_baseline.sh
+# Submit: sbatch experiments/sync/run.sh
 #
 
 set -euo pipefail
@@ -33,7 +33,7 @@ if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
 fi
 
 # Create log directory
-mkdir -p data_eff/logs
+mkdir -p experiments/logs
 
 # --- Configuration ---
 N_LAYER=12

@@ -7,7 +7,7 @@ Run this with the new training flow that logs:
   ens/val_loss per epoch          (ens/epoch as x, converted to step)
 
 Usage:
-    python data_eff/plot_ensemble_val.py \
+    python experiments/analysis/plot.py \
         --init-run <RUN_ID> \
         --init-shuffle-run <RUN_ID> \
         --steps-per-epoch 38 \

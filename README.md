@@ -1,3 +1,24 @@
+# Multi-Epoch Ensembling under Limited Training Data
+
+This fork extends [NanoGPT Slowrun](#nanogpt-slowrun) to study **multi-epoch training dynamics** in the data-limited regime (100M tokens, unlimited compute). Our research question: under fixed FLOPs, does ensembling over model inits and data orders improve performance? We explore **two ways of ensembling**:
+
+| Path | Where | Tradeoff |
+|---|---|---|
+| **(a) Synchronized in-process** | [experiments/sync/](experiments/sync/) | All N models train co-located in GPU memory; on-the-fly per-epoch ensemble val loss. Simple but ~Nx slower per GPU. |
+| **(b) Parallel + post-hoc replay** | [experiments/parallel/](experiments/parallel/) | One model per SLURM task into a shared checkpoint dir, then a dependent replay job computes ensemble metrics offline. Scales to larger models. |
+
+Quick start:
+```bash
+sbatch experiments/sync/run.sh         # path (a)
+bash   experiments/parallel/launch.sh  # path (b): training array + dependent replay
+```
+
+Spec of our diffs to [unlimited/train.py](unlimited/train.py): [experiments/README.md](experiments/README.md).
+Architecture, flags, and the data-efficiency metric: [CLAUDE.md](CLAUDE.md).
+Upstream limited / tiny / dev tracks have moved to [legacy/](legacy/).
+
+---
+
 # NanoGPT Slowrun
 ![Experiments](val_loss_animation.gif)
 
@@ -12,7 +33,7 @@ The baseline trains in \~47 minutes on 8xH100 (\~$12) and achieves 3.402 val los
 2. a tiny compute track capped at a single 8xH100 node for 15 minutes,
 3. and an unlimited compute track with minimal restrictions on hardware or time. 
 
-For now the limited track lives in the root directory, the tiny track lives at [tiny/](tiny/), and the unlimited track lives at [unlimited/](unlimited/). Submit an entry by opening a PR.
+For now the limited track lives at [legacy/limited_train.py](legacy/limited_train.py), the tiny track lives at [legacy/tiny/](legacy/tiny/), and the unlimited track lives at [unlimited/](unlimited/). Submit an entry by opening a PR.
 
 ## Running the current record 
 
@@ -21,7 +42,7 @@ You can reproduce the limited-compute record by running the following commands:
 git clone https://github.com/qlabs-eng/slowrun.git && cd slowrun
 pip install -r requirements.txt
 python prepare_data.py
-torchrun --standalone --nproc_per_node=8 train.py
+torchrun --standalone --nproc_per_node=8 legacy/limited_train.py
 ```
 
 ## World Record History

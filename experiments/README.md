@@ -59,7 +59,7 @@ Enables muP width scaling + 1/L depth scaling:
 - `muon`: Muon for all trainable 2D+ params (matrices, embeddings, LM head); AdamW for 1D scalars only
 - `adamw`: pure AdamW for all parameters
 
-### Orchestrator: `data_eff/completep.py`
+### Orchestrator: `experiments/sync/sweep.py`
 For each model size, launches up to 3 `unlimited/train.py` runs:
 1. No ensemble (`--num-models 1`)
 2. Init ensemble (`--num-models N --ensemble-type init`)
@@ -69,13 +69,13 @@ Model sizes are specified as comma-separated `layer:head:embd` triples.
 
 ```
 # Single model size
-python data_eff/completep.py \
+python experiments/sync/sweep.py \
     --model-sizes 12:12:768 \
     --num-models 5 --num-epochs 12 \
     --optimizer hybrid --nproc 8
 
 # Multi-size sweep (muP width/depth transfer)
-python data_eff/completep.py \
+python experiments/sync/sweep.py \
     --model-sizes 12:12:768,20:10:1280,26:14:1792 \
     --num-models 5 --num-epochs 12 \
     --optimizer hybrid --nproc 8 \

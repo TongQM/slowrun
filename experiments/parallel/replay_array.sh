@@ -8,13 +8,13 @@
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
 #SBATCH --array=0-1
-#SBATCH --output=data_eff/logs/%x_%A_%a.out
-#SBATCH --error=data_eff/logs/%x_%A_%a.err
+#SBATCH --output=experiments/logs/%x_%A_%a.out
+#SBATCH --error=experiments/logs/%x_%A_%a.err
 #
 # Post-hoc ensemble eval. One job per ensemble strategy:
 #   Array 0: replay init_ens
 #   Array 1: replay init_shuffle_ens
-# Submit via launch_parallel.sh with --dependency=afterok on the training array.
+# Submit via experiments/parallel/launch.sh with --dependency=afterok on the training array.
 
 set -euo pipefail
 
@@ -31,9 +31,9 @@ cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
 if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
     export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
 fi
-mkdir -p data_eff/logs
+mkdir -p experiments/logs
 
-# --- Configuration (must match run_baseline_parallel.sh) ---
+# --- Configuration (must match experiments/parallel/train_array.sh) ---
 N_LAYER=12
 N_EMBD=768
 NUM_MODELS=5
@@ -56,7 +56,7 @@ echo "============================================================"
 echo "Replay $STRATEGY_NAME from $CKPT_DIR"
 echo "============================================================"
 
-python data_eff/replay_ensemble_eval.py \
+python experiments/parallel/replay.py \
     --checkpoint-dir=$CKPT_DIR \
     --num-models=$NUM_MODELS \
     --num-epochs=$NUM_EPOCHS \
