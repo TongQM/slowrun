@@ -45,7 +45,15 @@ def main():
                    help="Path to val.pt (defaults to fineweb_data/fineweb_val.pt)")
     p.add_argument("--device-batch-size", type=int, default=2,
                    help="Used for evaluate_bpb path; ensemble eval uses B=1")
+    p.add_argument("--start-epoch", type=int, default=1,
+                   help="Resume from this epoch (1-indexed). Use for crash recovery.")
+    p.add_argument("--end-epoch", type=int, default=None,
+                   help="Stop after this epoch (defaults to --num-epochs)")
+    p.add_argument("--wandb-resume-id", type=str, default=None,
+                   help="If set, resume an existing wandb run with this ID instead of creating a new one.")
     args = p.parse_args()
+    if args.end_epoch is None:
+        args.end_epoch = args.num_epochs
 
     # Load training config to recover model architecture
     config_path = os.path.join(args.checkpoint_dir, "config.json")
@@ -111,8 +119,14 @@ def main():
     val_path = args.input_val_bin or os.path.join(DATA_DIR, "fineweb_val.pt")
     ens_eval_B = 1
     ens_eval_steps = EVAL_TOKENS // (ens_eval_B * MAX_SEQ_LEN * 1)  # single GPU, world_size=1
+    indiv_eval_B = args.device_batch_size
+    indiv_eval_steps = EVAL_TOKENS // (indiv_eval_B * MAX_SEQ_LEN * 1)
+    evaluate_bpb = train_mod.evaluate_bpb
 
-    # Init wandb
+    # Steps-per-epoch for x-axis (so per-model val maps to step count)
+    steps_per_epoch = train_config["training"].get("steps_per_epoch", 1)
+
+    # Init wandb (optionally resume an existing run)
     wandb_kwargs = {"project": args.wandb_project, "name": args.wandb_run_name,
                     "config": {"replay": True,
                                "ensemble_mode": args.ensemble_mode,
@@ -122,11 +136,22 @@ def main():
                                "training_config": train_config}}
     if args.wandb_group:
         wandb_kwargs["group"] = args.wandb_group
+    if args.wandb_resume_id:
+        wandb_kwargs["id"] = args.wandb_resume_id
+        wandb_kwargs["resume"] = "allow"
     run = wandb.init(**wandb_kwargs)
     print(f"Wandb run: {run.url}")
 
-    # Process each epoch
-    for epoch in range(1, args.num_epochs + 1):
+    # Define metric step axes (clean per-model curves in wandb)
+    for i in range(args.num_models):
+        run.define_metric(f"model_{i+1}/step")
+        run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/step")
+    run.define_metric("ens/epoch")
+    run.define_metric("ens/*", step_metric="ens/epoch")
+
+    # Process each epoch (with optional resume range)
+    print(f"Replay epochs {args.start_epoch}..{args.end_epoch}")
+    for epoch in range(args.start_epoch, args.end_epoch + 1):
         ckpt_paths = [os.path.join(args.checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
                       for i in range(args.num_models)]
         missing = [p for p in ckpt_paths if not os.path.exists(p)]
@@ -148,6 +173,21 @@ def main():
             models.append(m)
             del state_dict
 
+        # Per-model individual val eval
+        for i, m in enumerate(models):
+            indiv_loader = DataLoader(val_path, indiv_eval_B, MAX_SEQ_LEN,
+                                      device=device, seed=0, quiet=True)
+            with autocast_ctx:
+                vbpb, vloss = evaluate_bpb(m, indiv_loader, indiv_eval_steps, token_bytes)
+            print(f"  [model {i+1}] epoch {epoch}: val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
+            run.log({
+                f"model_{i+1}/val_loss": vloss,
+                f"model_{i+1}/val_bpb": vbpb,
+                f"model_{i+1}/epoch": epoch,
+                f"model_{i+1}/step": epoch * steps_per_epoch,
+            }, commit=True)
+
+        # Ensemble val eval
         val_loader = DataLoader(val_path, ens_eval_B, MAX_SEQ_LEN,
                                 device=device, seed=0, quiet=True)
         ebpb, eloss = evaluate_ensemble_in_memory(
@@ -155,7 +195,7 @@ def main():
             device, autocast_ctx, mode=args.ensemble_mode)
 
         dt = time.time() - t0
-        print(f"[epoch {epoch}] ens_val_loss={eloss:.6f} ens_val_bpb={ebpb:.6f}  ({dt:.1f}s)")
+        print(f"[epoch {epoch}] ens_val_loss={eloss:.6f} ens_val_bpb={ebpb:.6f}  ({dt:.1f}s total)")
 
         run.log({
             "ens/val_loss": eloss,

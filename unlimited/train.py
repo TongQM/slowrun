@@ -1778,6 +1778,10 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 f"model_{i+1}/epoch": epoch,
             }, commit=True)
 
+            # Always run individual val eval at epoch boundary (guaranteed data point)
+            vbpb, vloss = _run_individual_val(i, epoch)
+            print0(f"  [model {i+1}] epoch {epoch} val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
+
         # ===== Epoch-boundary: ensemble val eval (skip if single-model mode) =====
         if not single_mode:
             ens_bpb, ens_loss = _run_ensemble_val(epoch)

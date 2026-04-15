@@ -93,6 +93,7 @@ torchrun \
     --optimizer=$OPTIMIZER \
     --ensemble-mode=$ENSEMBLE_MODE \
     --data-fraction=$DATA_FRACTION \
+    --val-every-n-steps=10 \
     --num-epochs-model-0=$NUM_EPOCHS \
     --compile-mode=inductor \
     --resume=$RUN_ID \
