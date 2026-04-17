@@ -4,7 +4,7 @@
 # flash-attn (FA2) so sliding-window attention stays enabled on A100.
 #
 # Run on a compute node, not the login node (flash-attn build is heavy):
-#   idev -p gpu-a100-small -A dms26007 -t 1:00:00
+#   idev -p gpu-a100-small -A DMS26010 -t 1:00:00
 #   bash experiments/env/setup_lonestar.sh
 #
 # Safe to re-run; uses venv + pip, no conda.

@@ -7,7 +7,7 @@
 # One-time setup:
 #   bash experiments/env/setup_lonestar.sh
 #   echo YOUR_WANDB_KEY > ~/.wandb_key && chmod 600 ~/.wandb_key
-#   python prepare_data.py    # on a compute node: idev -p gpu-a100-small -A dms26007
+#   python prepare_data.py    # on a compute node: idev -p gpu-a100-small -A DMS26010
 #
 # Usage:
 #   bash experiments/parallel/launch.sh

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J parallel_train
 #SBATCH -p gpu-a100-small
-#SBATCH -A dms26007
+#SBATCH -A DMS26010
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 02:00:00
@@ -27,7 +27,7 @@ REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
 cd "$REPO_ROOT"
 
 # --- Environment (one-time setup via experiments/env/setup_lonestar.sh) ---
-module load cuda/12.8
+module load cuda/12.8 python/3.12.11
 source "$REPO_ROOT/.venv/bin/activate"
 
 if [ -f "$HOME/.wandb_key" ]; then

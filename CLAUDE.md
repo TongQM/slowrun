@@ -88,7 +88,7 @@ wandb key stored at `~/.wandb_key` (chmod 600).
 ### Cluster (TACC Lonestar6)
 - Repo root: `/work/11426/yzfx0416/ls6/slowrun`
 - Partitions: `gpu-a100-small` (1× A100-40GB slice, what we use), `gpu-a100` (3× A100/node), `gpu-h100` (2× H100-80/node, 4 nodes total)
-- Allocation: `dms26007` (billed); `dms26010` and `default` also available
+- Allocation: `DMS26010` (39,578 SU, primary); `DMS26007` (892 SU) and `default` also available. TACC requires uppercase.
 - CUDA module: `cuda/12.8`; Python: `python/3.12.11` via `module load`
 - Venv: `/work/11426/yzfx0416/ls6/slowrun/.venv` (created by `experiments/env/setup_lonestar.sh`)
 - A100 requires `flash-attn` (FA2) installed explicitly — otherwise SDPA fallback drops sliding-window attention
