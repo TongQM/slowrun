@@ -1,8 +1,10 @@
 #!/bin/bash
-# Orchestrator for Lonestar6 (TACC): submits 40 single-GPU training tasks
-# (20 models × 2 ensemble strategies) and a dependent 2-task replay array.
-# All training tasks of one strategy share a checkpoint dir keyed by a shared
-# timestamp.
+# Orchestrator for Lonestar6 (TACC): submits parallel ensemble training
+# as separate per-strategy arrays (to stay within TACC's 8-job QOS limit),
+# then a dependent replay array.
+#
+# Layout: 2 training arrays (20 models each, %8 concurrency throttle)
+#         + 1 replay array (2 tasks, afterok on both training arrays)
 #
 # One-time setup:
 #   bash experiments/env/setup_lonestar.sh
@@ -12,7 +14,7 @@
 # Usage:
 #   bash experiments/parallel/launch.sh
 #
-# Wall time: training ~1-2h per task on A100-40GB, replay ~30m.
+# Wall time: training ~1-2h per task on A100-40GB, replay ~2-4h.
 
 set -euo pipefail
 
@@ -23,7 +25,7 @@ export SHARED_TIMESTAMP
 
 echo "Shared timestamp: $SHARED_TIMESTAMP"
 
-# Pre-create checkpoint dirs (training jobs all write into these)
+# Pre-create checkpoint dirs
 for STRATEGY in init_ens init_shuffle_ens; do
     DIR="checkpoints/parallel_${STRATEGY}_${SHARED_TIMESTAMP}"
     mkdir -p "$DIR"
@@ -32,19 +34,31 @@ done
 
 mkdir -p experiments/logs
 
-# Submit training array
+# Submit init ensemble (20 models, max 8 concurrent)
 echo
-echo "Submitting training array (40 jobs: 20 models × 2 strategies)..."
-TRAIN_JOB=$(sbatch --parsable --export=ALL,SHARED_TIMESTAMP \
-    experiments/parallel/train_array.sh)
-echo "  Training array job ID: $TRAIN_JOB"
+echo "Submitting init ensemble (20 models, %8 throttle)..."
+INIT_JOB=$(sbatch --parsable \
+    --array=0-19%8 \
+    --export=ALL,SHARED_TIMESTAMP,ENSEMBLE_TYPE=init,STRATEGY_NAME=init_ens \
+    experiments/parallel/train_array.sh 2>/dev/null | tail -1)
+echo "  Init training job ID: $INIT_JOB"
 
-# Submit replay array with dependency
+# Submit init+shuffle ensemble (20 models, max 8 concurrent)
 echo
-echo "Submitting replay array (2 jobs, depends on $TRAIN_JOB)..."
-REPLAY_JOB=$(sbatch --parsable --dependency=afterok:$TRAIN_JOB \
+echo "Submitting init+shuffle ensemble (20 models, %8 throttle)..."
+SHUFFLE_JOB=$(sbatch --parsable \
+    --array=0-19%8 \
+    --export=ALL,SHARED_TIMESTAMP,ENSEMBLE_TYPE=init_shuffle,STRATEGY_NAME=init_shuffle_ens \
+    experiments/parallel/train_array.sh 2>/dev/null | tail -1)
+echo "  Init+shuffle training job ID: $SHUFFLE_JOB"
+
+# Submit replay array (depends on BOTH training arrays completing)
+echo
+echo "Submitting replay array (2 jobs, depends on $INIT_JOB and $SHUFFLE_JOB)..."
+REPLAY_JOB=$(sbatch --parsable \
+    --dependency=afterok:${INIT_JOB}:${SHUFFLE_JOB} \
     --export=ALL,SHARED_TIMESTAMP \
-    experiments/parallel/replay_array.sh)
+    experiments/parallel/replay_array.sh 2>/dev/null | tail -1)
 echo "  Replay array job ID: $REPLAY_JOB"
 
 echo
@@ -56,4 +70,5 @@ echo "Checkpoint dirs:"
 echo "  checkpoints/parallel_init_ens_${SHARED_TIMESTAMP}/"
 echo "  checkpoints/parallel_init_shuffle_ens_${SHARED_TIMESTAMP}/"
 echo
-echo "Wandb group: parallel_d12_w768_df0.2_${SHARED_TIMESTAMP}"
+echo "Wandb project: slowrun_lonestar"
+echo "Wandb group:   parallel_d12_w768_df0.2_${SHARED_TIMESTAMP}"

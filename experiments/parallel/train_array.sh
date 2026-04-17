@@ -5,14 +5,13 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 02:00:00
-#SBATCH --array=0-39
 #SBATCH -o experiments/logs/%x_%A_%a.out
 #SBATCH -e experiments/logs/%x_%A_%a.err
 #
 # Lonestar6 / TACC: 1 A100-40GB slice per array task.
-# 40 tasks = 20 models × 2 ensemble strategies (init, init_shuffle).
-# Each task trains ONE model and writes into a strategy-shared checkpoint dir
-# keyed by SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
+# Each task trains ONE model for all epochs. Array indices map to model
+# indices within a SINGLE strategy (set via ENSEMBLE_TYPE env var).
+# The orchestrator (launch.sh) submits one array per strategy.
 #
 # Submit via: bash experiments/parallel/launch.sh   (NOT directly with sbatch)
 
@@ -22,11 +21,14 @@ if [ -z "${SHARED_TIMESTAMP:-}" ]; then
     echo "ERROR: SHARED_TIMESTAMP env var not set. Use experiments/parallel/launch.sh."
     exit 1
 fi
+if [ -z "${ENSEMBLE_TYPE:-}" ] || [ -z "${STRATEGY_NAME:-}" ]; then
+    echo "ERROR: ENSEMBLE_TYPE and STRATEGY_NAME must be set by launch.sh."
+    exit 1
+fi
 
 REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
 cd "$REPO_ROOT"
 
-# --- Environment (one-time setup via experiments/env/setup_lonestar.sh) ---
 module load cuda/12.8 python/3.12.11
 source "$REPO_ROOT/.venv/bin/activate"
 
@@ -47,15 +49,7 @@ OPTIMIZER="hybrid"
 ENSEMBLE_MODE="logit"
 WANDB_GROUP="parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}"
 
-# --- Map array index to (strategy, model_idx) ---
-STRATEGY_IDX=$((SLURM_ARRAY_TASK_ID / NUM_MODELS))
-MODEL_IDX=$((SLURM_ARRAY_TASK_ID % NUM_MODELS))
-
-case $STRATEGY_IDX in
-    0) ENSEMBLE_TYPE="init";         STRATEGY_NAME="init_ens" ;;
-    1) ENSEMBLE_TYPE="init_shuffle"; STRATEGY_NAME="init_shuffle_ens" ;;
-    *) echo "Invalid STRATEGY_IDX=$STRATEGY_IDX"; exit 1 ;;
-esac
+MODEL_IDX=$SLURM_ARRAY_TASK_ID
 
 RUN_ID="parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_model${MODEL_IDX}"
