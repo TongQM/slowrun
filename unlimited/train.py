@@ -1861,7 +1861,7 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     run_name = args.run if args.run else f"ensemble_{run_id}"
-    _wandb_kwargs = {"project": "slowrun", "name": run_name,
+    _wandb_kwargs = {"project": os.environ.get("WANDB_PROJECT", "slowrun"), "name": run_name,
                      "config": {"optimizer": args.optimizer, "completep": args.completep,
                                 "ensemble_type": args.ensemble_type, "ensemble_mode": args.ensemble_mode,
                                 "mup_base_width": args.mup_base_width,

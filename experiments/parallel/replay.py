@@ -40,7 +40,7 @@ def main():
     p.add_argument("--ensemble-mode", default="logit", choices=["logit", "prob"])
     p.add_argument("--wandb-run-name", required=True)
     p.add_argument("--wandb-group", default=None)
-    p.add_argument("--wandb-project", default="slowrun")
+    p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "slowrun"))
     p.add_argument("--input-val-bin", default=None,
                    help="Path to val.pt (defaults to fineweb_data/fineweb_val.pt)")
     p.add_argument("--device-batch-size", type=int, default=2,

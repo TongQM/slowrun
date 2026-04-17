@@ -30,6 +30,7 @@ source "$REPO_ROOT/.venv/bin/activate"
 if [ -f "$HOME/.wandb_key" ]; then
     export WANDB_API_KEY=$(cat "$HOME/.wandb_key")
 fi
+export WANDB_PROJECT=slowrun_lonestar
 mkdir -p experiments/logs
 
 # --- Configuration ---
