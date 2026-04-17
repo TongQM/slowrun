@@ -1,38 +1,35 @@
 #!/bin/bash
-#SBATCH --job-name=completep_baseline
-#SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
-#SBATCH --gpus=h100-80:1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=8:00:00
+#SBATCH -J sync_baseline
+#SBATCH -p gpu-a100-small
+#SBATCH -A dms26007
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 08:00:00
 #SBATCH --array=0-1
-#SBATCH --output=experiments/logs/%x_%A_%a.out
-#SBATCH --error=experiments/logs/%x_%A_%a.err
+#SBATCH -o experiments/logs/%x_%A_%a.out
+#SBATCH -e experiments/logs/%x_%A_%a.err
 #
-# Baseline: 2 ensemble strategies on d12 model (n_layer=12, n_embd=768, n_head=12, ~125M params)
-#   Array 0: init ensemble     (5 models, same data order; model 1 = single-model baseline)
-#   Array 1: init+shuffle      (5 models, different data orders)
-# The no-ensemble baseline comes free as model_1/* in either run (same seed=42, same data).
+# Lonestar6 / TACC: synchronized in-process ensemble training (path a).
+# Each array task trains all N models co-located on one A100 slice,
+# evaluating per-model + ensemble val loss at each epoch boundary.
+#   Array 0: init ensemble     (5 models, shared per-epoch data permutation)
+#   Array 1: init+shuffle      (5 models, independent per-epoch permutations)
+# The no-ensemble baseline comes free as model_1/* in either run (same seed=42).
 #
-# Submit: sbatch experiments/sync/run.sh
-#
+# One-time setup: bash experiments/env/setup_lonestar.sh
+# Submit:         sbatch experiments/sync/run.sh
 
 set -euo pipefail
 
-# --- Environment ---
-module load anaconda3/2024.10-1
-conda activate slowrun
+REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
+cd "$REPO_ROOT"
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+module load cuda/12.8
+source "$REPO_ROOT/.venv/bin/activate"
 
-# wandb API key (create this file with: echo "YOUR_KEY" > /ocean/projects/cis260095p/ymiao6/.wandb_key)
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+if [ -f "$HOME/.wandb_key" ]; then
+    export WANDB_API_KEY=$(cat "$HOME/.wandb_key")
 fi
-
-# Create log directory
 mkdir -p experiments/logs
 
 # --- Configuration ---
@@ -40,31 +37,23 @@ N_LAYER=12
 N_HEAD=12
 N_EMBD=768
 NUM_MODELS=5
-NUM_EPOCHS=30              # more epochs to study multi-epoch dynamics
+NUM_EPOCHS=30              # multi-epoch dynamics
 DATA_FRACTION=0.2          # 20M tokens per epoch (20% of 100M)
 OPTIMIZER="hybrid"
 ENSEMBLE_MODE="logit"
 WANDB_GROUP="baseline_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}"
 
-# --- Map array index to ensemble config ---
 case $SLURM_ARRAY_TASK_ID in
-    0)
-        ENSEMBLE_TYPE="init"
-        RUN_NAME="${WANDB_GROUP}_init_ens"
-        ;;
-    1)
-        ENSEMBLE_TYPE="init_shuffle"
-        RUN_NAME="${WANDB_GROUP}_init_shuffle_ens"
-        ;;
+    0) ENSEMBLE_TYPE="init";         RUN_NAME="${WANDB_GROUP}_init_ens" ;;
+    1) ENSEMBLE_TYPE="init_shuffle"; RUN_NAME="${WANDB_GROUP}_init_shuffle_ens" ;;
+    *) echo "Invalid array task $SLURM_ARRAY_TASK_ID"; exit 1 ;;
 esac
-RUN_MODELS=$NUM_MODELS
 
 echo "============================================================"
-echo "Job: $SLURM_JOB_NAME (array $SLURM_ARRAY_TASK_ID)"
-echo "Node: $(hostname), GPUs: ${SLURM_GPUS_ON_NODE:-4}"
-echo "Run: $RUN_NAME"
-echo "Config: d${N_LAYER} w${N_EMBD} h${N_HEAD}"
-echo "Ensemble: type=$ENSEMBLE_TYPE, models=$RUN_MODELS"
+echo "Lonestar6 sync-ensemble array task $SLURM_ARRAY_TASK_ID on $(hostname)"
+echo "  Run: $RUN_NAME"
+echo "  Config: d${N_LAYER} w${N_EMBD} h${N_HEAD}"
+echo "  Ensemble: type=$ENSEMBLE_TYPE, models=$NUM_MODELS"
 echo "============================================================"
 
 torchrun \
@@ -74,7 +63,7 @@ torchrun \
     --n_layer=$N_LAYER \
     --n_head=$N_HEAD \
     --n_embd=$N_EMBD \
-    --num-models=$RUN_MODELS \
+    --num-models=$NUM_MODELS \
     --ensemble-type=$ENSEMBLE_TYPE \
     --num-epochs=$NUM_EPOCHS \
     --optimizer=$OPTIMIZER \

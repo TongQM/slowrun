@@ -83,14 +83,16 @@ All metrics logged to **wandb** project `slowrun` (entity: `xjtumyd-carnegie-mel
 - `ensemble/num_models` — ensemble size
 - `epoch` — current epoch
 
-wandb key stored at `/ocean/projects/cis260095p/ymiao6/.wandb_key`.
+wandb key stored at `~/.wandb_key` (chmod 600).
 
-### Cluster (PSC Bridges-2)
-- H100-80GB nodes: `w001-w010` (8 GPUs each, need `--constraint=h100`)
-- V100-32GB: 33 nodes, L40S-48GB: 3 nodes (need FA2 fallback, no FA3)
-- CUDA driver: 12.6 — requires `torch<2.7` (torch 2.6.0 with CUDA 12.4)
-- Venv: `/ocean/projects/cis260095p/ymiao6/scaling/slowrun/.venv`
-- UV dirs: `UV_CACHE_DIR=/ocean/projects/cis260095p/ymiao6/.uv/cache`, `UV_PYTHON_INSTALL_DIR=/ocean/projects/cis260095p/ymiao6/.uv/python`
+### Cluster (TACC Lonestar6)
+- Repo root: `/work/11426/yzfx0416/ls6/slowrun`
+- Partitions: `gpu-a100-small` (1× A100-40GB slice, what we use), `gpu-a100` (3× A100/node), `gpu-h100` (2× H100-80/node, 4 nodes total)
+- Allocation: `dms26007` (billed); `dms26010` and `default` also available
+- CUDA module: `cuda/12.8`; Python: `python/3.12.11` via `module load`
+- Venv: `/work/11426/yzfx0416/ls6/slowrun/.venv` (created by `experiments/env/setup_lonestar.sh`)
+- A100 requires `flash-attn` (FA2) installed explicitly — otherwise SDPA fallback drops sliding-window attention
+- FA3 is Hopper-only and auto-skipped on A100 via `torch.cuda.get_device_capability()` major check
 
 ## Data Efficiency Metric
 
