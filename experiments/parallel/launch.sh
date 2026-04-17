@@ -3,8 +3,9 @@
 # as separate per-strategy arrays (to stay within TACC's 8-job QOS limit),
 # then a dependent replay array.
 #
-# Layout: 2 training arrays (20 models each, %8 concurrency throttle)
-#         + 1 replay array (2 tasks, afterok on both training arrays)
+# Layout: 2 training arrays of 8 tasks (each task trains ceil(20/8)=3 models
+#         sequentially), chained so init runs first then init+shuffle,
+#         + 1 replay array (2 tasks, afterok on init+shuffle array)
 #
 # One-time setup:
 #   bash experiments/env/setup_lonestar.sh
@@ -36,18 +37,19 @@ mkdir -p experiments/logs
 
 # Submit init ensemble (20 models, max 8 concurrent)
 echo
-echo "Submitting init ensemble (20 models, %8 throttle)..."
+echo "Submitting init ensemble (8 tasks × ~3 models each)..."
 INIT_JOB=$(sbatch --parsable \
-    --array=0-19%8 \
+    --array=0-7 \
     --export=ALL,SHARED_TIMESTAMP,ENSEMBLE_TYPE=init,STRATEGY_NAME=init_ens \
     experiments/parallel/train_array.sh 2>/dev/null | tail -1)
 echo "  Init training job ID: $INIT_JOB"
 
-# Submit init+shuffle ensemble (20 models, max 8 concurrent)
+# Submit init+shuffle ensemble (chained after init to stay within QOS submit limit)
 echo
-echo "Submitting init+shuffle ensemble (20 models, %8 throttle)..."
+echo "Submitting init+shuffle ensemble (8 tasks × ~3 models each, after init)..."
 SHUFFLE_JOB=$(sbatch --parsable \
-    --array=0-19%8 \
+    --array=0-7 \
+    --dependency=afterany:${INIT_JOB} \
     --export=ALL,SHARED_TIMESTAMP,ENSEMBLE_TYPE=init_shuffle,STRATEGY_NAME=init_shuffle_ens \
     experiments/parallel/train_array.sh 2>/dev/null | tail -1)
 echo "  Init+shuffle training job ID: $SHUFFLE_JOB"
@@ -56,7 +58,7 @@ echo "  Init+shuffle training job ID: $SHUFFLE_JOB"
 echo
 echo "Submitting replay array (2 jobs, depends on $INIT_JOB and $SHUFFLE_JOB)..."
 REPLAY_JOB=$(sbatch --parsable \
-    --dependency=afterok:${INIT_JOB}:${SHUFFLE_JOB} \
+    --dependency=afterok:${SHUFFLE_JOB} \
     --export=ALL,SHARED_TIMESTAMP \
     experiments/parallel/replay_array.sh 2>/dev/null | tail -1)
 echo "  Replay array job ID: $REPLAY_JOB"
