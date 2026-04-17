@@ -1,25 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=parallel_baseline
-#SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
-#SBATCH --gpus=h100-80:1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=2:00:00
+#SBATCH -J parallel_train
+#SBATCH -p gpu-a100-small
+#SBATCH -A dms26007
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 02:00:00
 #SBATCH --array=0-9
-#SBATCH --output=experiments/logs/%x_%A_%a.out
-#SBATCH --error=experiments/logs/%x_%A_%a.err
+#SBATCH -o experiments/logs/%x_%A_%a.out
+#SBATCH -e experiments/logs/%x_%A_%a.err
 #
-# Parallel single-model training: 5 models × 2 ensemble strategies = 10 jobs
-#   Array 0..4: init ensemble        models 0..4
-#   Array 5..9: init+shuffle ensemble models 0..4
-#
-# All 5 jobs of one strategy write to a SHARED checkpoint dir, identified by
-# the env var SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
+# Lonestar6 / TACC: 1 A100-40GB slice per array task.
+# 10 tasks = 5 models × 2 ensemble strategies (init, init_shuffle).
+# Each task trains ONE model and writes into a strategy-shared checkpoint dir
+# keyed by SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
 #
 # Submit via: bash experiments/parallel/launch.sh   (NOT directly with sbatch)
-#
 
 set -euo pipefail
 
@@ -28,18 +23,19 @@ if [ -z "${SHARED_TIMESTAMP:-}" ]; then
     exit 1
 fi
 
-# --- Environment ---
-module load anaconda3/2024.10-1
-conda activate slowrun
+REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
+cd "$REPO_ROOT"
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+# --- Environment (one-time setup via experiments/env/setup_lonestar.sh) ---
+module load cuda/12.8
+source "$REPO_ROOT/.venv/bin/activate"
 
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+if [ -f "$HOME/.wandb_key" ]; then
+    export WANDB_API_KEY=$(cat "$HOME/.wandb_key")
 fi
 mkdir -p experiments/logs
 
-# --- Configuration (must match experiments/sync/run.sh / experiments/parallel/launch.sh) ---
+# --- Configuration (must match experiments/parallel/replay_array.sh) ---
 N_LAYER=12
 N_HEAD=12
 N_EMBD=768
@@ -55,24 +51,16 @@ STRATEGY_IDX=$((SLURM_ARRAY_TASK_ID / NUM_MODELS))
 MODEL_IDX=$((SLURM_ARRAY_TASK_ID % NUM_MODELS))
 
 case $STRATEGY_IDX in
-    0)
-        ENSEMBLE_TYPE="init"
-        STRATEGY_NAME="init_ens"
-        ;;
-    1)
-        ENSEMBLE_TYPE="init_shuffle"
-        STRATEGY_NAME="init_shuffle_ens"
-        ;;
-    *)
-        echo "Invalid STRATEGY_IDX=$STRATEGY_IDX"; exit 1
-        ;;
+    0) ENSEMBLE_TYPE="init";         STRATEGY_NAME="init_ens" ;;
+    1) ENSEMBLE_TYPE="init_shuffle"; STRATEGY_NAME="init_shuffle_ens" ;;
+    *) echo "Invalid STRATEGY_IDX=$STRATEGY_IDX"; exit 1 ;;
 esac
 
 RUN_ID="parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_model${MODEL_IDX}"
 
 echo "============================================================"
-echo "Parallel job (array $SLURM_ARRAY_TASK_ID)"
+echo "Lonestar6 array task $SLURM_ARRAY_TASK_ID on $(hostname)"
 echo "  Strategy: $STRATEGY_NAME (ensemble_type=$ENSEMBLE_TYPE)"
 echo "  Model index: $MODEL_IDX of $NUM_MODELS"
 echo "  Run ID (shared dir): $RUN_ID"

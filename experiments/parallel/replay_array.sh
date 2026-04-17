@@ -1,17 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=replay_ensemble
-#SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
-#SBATCH --gpus=h100-80:1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=2:00:00
+#SBATCH -J parallel_replay
+#SBATCH -p gpu-a100-small
+#SBATCH -A dms26007
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 02:00:00
 #SBATCH --array=0-1
-#SBATCH --output=experiments/logs/%x_%A_%a.out
-#SBATCH --error=experiments/logs/%x_%A_%a.err
+#SBATCH -o experiments/logs/%x_%A_%a.out
+#SBATCH -e experiments/logs/%x_%A_%a.err
 #
-# Post-hoc ensemble eval. One job per ensemble strategy:
+# Lonestar6: post-hoc ensemble eval, one task per ensemble strategy:
 #   Array 0: replay init_ens
 #   Array 1: replay init_shuffle_ens
 # Submit via experiments/parallel/launch.sh with --dependency=afterok on the training array.
@@ -23,13 +21,14 @@ if [ -z "${SHARED_TIMESTAMP:-}" ]; then
     exit 1
 fi
 
-module load anaconda3/2024.10-1
-conda activate slowrun
+REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
+cd "$REPO_ROOT"
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+module load cuda/12.8
+source "$REPO_ROOT/.venv/bin/activate"
 
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+if [ -f "$HOME/.wandb_key" ]; then
+    export WANDB_API_KEY=$(cat "$HOME/.wandb_key")
 fi
 mkdir -p experiments/logs
 
@@ -53,7 +52,7 @@ CKPT_DIR="checkpoints/${RUN_ID}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_replay"
 
 echo "============================================================"
-echo "Replay $STRATEGY_NAME from $CKPT_DIR"
+echo "Replay $STRATEGY_NAME from $CKPT_DIR on $(hostname)"
 echo "============================================================"
 
 python experiments/parallel/replay.py \

@@ -1,16 +1,18 @@
 #!/bin/bash
-# Orchestrator: launches parallel ensemble training (10 jobs) + post-hoc replay (2 jobs).
-# Generates a shared timestamp so all training jobs of one strategy share a checkpoint dir.
+# Orchestrator for Lonestar6 (TACC): submits 10 single-GPU training tasks
+# (5 models × 2 ensemble strategies) and a dependent 2-task replay array.
+# All training tasks of one strategy share a checkpoint dir keyed by a shared
+# timestamp.
+#
+# One-time setup:
+#   bash experiments/env/setup_lonestar.sh
+#   echo YOUR_WANDB_KEY > ~/.wandb_key && chmod 600 ~/.wandb_key
+#   python prepare_data.py    # on a compute node: idev -p gpu-a100-small -A dms26007
 #
 # Usage:
 #   bash experiments/parallel/launch.sh
 #
-# This will:
-#   1. Create checkpoint directories
-#   2. Submit a 10-task training array (5 models × 2 strategies)
-#   3. Submit a 2-task replay array with --dependency=afterok on the training job
-#
-# Wall time: training jobs run in parallel (~1-2h each on H100), then replay (~30m).
+# Wall time: training ~1-2h per task on A100-40GB, replay ~30m.
 
 set -euo pipefail
 

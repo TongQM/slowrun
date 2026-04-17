@@ -1,3 +1,32 @@
+## Running on Lonestar6 (TACC)
+
+One-time setup, inside an idev session (flash-attn build is too heavy for the login node):
+
+```bash
+idev -p gpu-a100-small -A dms26007 -t 1:00:00
+bash experiments/env/setup_lonestar.sh         # creates .venv + installs torch + flash-attn (FA2)
+echo YOUR_WANDB_KEY > ~/.wandb_key && chmod 600 ~/.wandb_key
+python prepare_data.py                          # tokenize 100M FineWeb tokens
+```
+
+Launch the parallel ensembling experiment (path (b)):
+
+```bash
+bash experiments/parallel/launch.sh
+```
+
+This submits two SBATCH arrays on partition `gpu-a100-small`, account `dms26007`:
+- **train_array** (10 tasks): 5 models × {init, init_shuffle} trained independently into shared checkpoint dirs
+- **replay_array** (2 tasks, `--dependency=afterok`): per-epoch ensemble eval + per-model val loss, logged to wandb
+
+See [parallel/train_array.sh](parallel/train_array.sh) for model size, epoch count, and ensemble-mode knobs. Edit there before launching if the defaults (d12, w768, 30 epochs, data_fraction=0.2, logit averaging) aren't what you want; make sure [parallel/replay_array.sh](parallel/replay_array.sh) stays in sync.
+
+### A100 note
+
+FA3 is Hopper-only and is auto-skipped on A100. With `flash-attn` installed, FA2 is used (sliding-window attention preserved). Without it, the code falls back to SDPA and disables sliding-window — [setup_lonestar.sh](env/setup_lonestar.sh) installs it so you don't have to think about this.
+
+---
+
 ## Data efficiency calculation
 
 For a given method's validation loss, we use piecewise linear interpolation between the baseline validation loss to find the equivalent dataset size that achieves the same loss. Data efficiency is then the ratio of this equivalent size to the base token budget. For example if our method trained on 100M tokens matches the test loss of 1B tokens using a baseline, the data efficiency is 10x. 
