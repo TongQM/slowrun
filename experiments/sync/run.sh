@@ -25,6 +25,7 @@ REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
 cd "$REPO_ROOT"
 
 module load cuda/12.8 python/3.12.11
+unset PYTHONPATH
 source "$REPO_ROOT/.venv/bin/activate"
 
 if [ -f "$HOME/.wandb_key" ]; then
