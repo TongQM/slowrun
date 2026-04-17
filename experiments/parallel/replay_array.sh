@@ -4,7 +4,7 @@
 #SBATCH -A DMS26010
 #SBATCH -N 1
 #SBATCH -n 1
-#SBATCH -t 02:00:00
+#SBATCH -t 04:00:00
 #SBATCH --array=0-1
 #SBATCH -o experiments/logs/%x_%A_%a.out
 #SBATCH -e experiments/logs/%x_%A_%a.err
@@ -36,8 +36,8 @@ mkdir -p experiments/logs
 # --- Configuration (must match experiments/parallel/train_array.sh) ---
 N_LAYER=12
 N_EMBD=768
-NUM_MODELS=5
-NUM_EPOCHS=30
+NUM_MODELS=20
+NUM_EPOCHS=20
 DATA_FRACTION=0.2
 ENSEMBLE_MODE="logit"
 WANDB_GROUP="parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}"

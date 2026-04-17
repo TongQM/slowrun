@@ -1,6 +1,6 @@
 #!/bin/bash
-# Orchestrator for Lonestar6 (TACC): submits 10 single-GPU training tasks
-# (5 models × 2 ensemble strategies) and a dependent 2-task replay array.
+# Orchestrator for Lonestar6 (TACC): submits 40 single-GPU training tasks
+# (20 models × 2 ensemble strategies) and a dependent 2-task replay array.
 # All training tasks of one strategy share a checkpoint dir keyed by a shared
 # timestamp.
 #
@@ -34,7 +34,7 @@ mkdir -p experiments/logs
 
 # Submit training array
 echo
-echo "Submitting training array (10 jobs)..."
+echo "Submitting training array (40 jobs: 20 models × 2 strategies)..."
 TRAIN_JOB=$(sbatch --parsable --export=ALL,SHARED_TIMESTAMP \
     experiments/parallel/train_array.sh)
 echo "  Training array job ID: $TRAIN_JOB"

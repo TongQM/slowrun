@@ -5,12 +5,12 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 02:00:00
-#SBATCH --array=0-9
+#SBATCH --array=0-39
 #SBATCH -o experiments/logs/%x_%A_%a.out
 #SBATCH -e experiments/logs/%x_%A_%a.err
 #
 # Lonestar6 / TACC: 1 A100-40GB slice per array task.
-# 10 tasks = 5 models × 2 ensemble strategies (init, init_shuffle).
+# 40 tasks = 20 models × 2 ensemble strategies (init, init_shuffle).
 # Each task trains ONE model and writes into a strategy-shared checkpoint dir
 # keyed by SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
 #
@@ -40,8 +40,8 @@ mkdir -p experiments/logs
 N_LAYER=12
 N_HEAD=12
 N_EMBD=768
-NUM_MODELS=5
-NUM_EPOCHS=30
+NUM_MODELS=20
+NUM_EPOCHS=20
 DATA_FRACTION=0.2
 OPTIMIZER="hybrid"
 ENSEMBLE_MODE="logit"
