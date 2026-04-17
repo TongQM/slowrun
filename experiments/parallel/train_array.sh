@@ -89,6 +89,7 @@ for MODEL_IDX in $(seq $START_MODEL $END_MODEL); do
         --data-fraction=$DATA_FRACTION \
         --val-every-n-steps=10 \
         --num-epochs-model-0=$NUM_EPOCHS \
+        --completep \
         --compile-mode=inductor \
         --resume=$RUN_ID \
         --run=$RUN_NAME \

@@ -72,6 +72,7 @@ torchrun \
     --data-fraction=$DATA_FRACTION \
     --val-every-n-steps=10 \
     --num-epochs-model-0=$NUM_EPOCHS \
+    --completep \
     --compile-mode=inductor \
     --run=$RUN_NAME \
     --wandb_group=$WANDB_GROUP
