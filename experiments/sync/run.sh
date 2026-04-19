@@ -24,7 +24,9 @@ set -euo pipefail
 REPO_ROOT=/work/11426/yzfx0416/ls6/slowrun
 cd "$REPO_ROOT"
 
+module purge 2>/dev/null
 module load cuda/12.8
+unset PYTHONPATH PYTHONHOME
 export LD_LIBRARY_PATH=/opt/apps/python/3.12.11/lib:${LD_LIBRARY_PATH:-}
 source "$REPO_ROOT/.venv/bin/activate"
 
