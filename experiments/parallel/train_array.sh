@@ -4,19 +4,20 @@
 #SBATCH --account=cis260095p
 #SBATCH --gpus=h100-80:1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
-#SBATCH --array=0-9
+#SBATCH --array=0-39
 #SBATCH --output=experiments/logs/%x_%A_%a.out
 #SBATCH --error=experiments/logs/%x_%A_%a.err
 #
-# Parallel single-model training: 5 models × 2 ensemble strategies = 10 jobs
-#   Array 0..4: init ensemble        models 0..4
-#   Array 5..9: init+shuffle ensemble models 0..4
+# Parallel single-model training: 20 models × 2 ensemble strategies = 40 jobs
+#   Array 0..19:  init ensemble        models 0..19
+#   Array 20..39: init+shuffle ensemble models 0..19
 #
-# All 5 jobs of one strategy write to a SHARED checkpoint dir, identified by
+# All jobs of one strategy write to a SHARED checkpoint dir, identified by
 # the env var SHARED_TIMESTAMP (set by experiments/parallel/launch.sh).
+# Jobs skip training if their final checkpoint already exists (safe to resubmit).
 #
 # Submit via: bash experiments/parallel/launch.sh   (NOT directly with sbatch)
 #
@@ -39,15 +40,20 @@ if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
 fi
 mkdir -p experiments/logs
 
-# --- Configuration (must match experiments/sync/run.sh / experiments/parallel/launch.sh) ---
-N_LAYER=12
-N_HEAD=12
-N_EMBD=768
-NUM_MODELS=5
-NUM_EPOCHS=30
-DATA_FRACTION=0.2
-OPTIMIZER="hybrid"
-ENSEMBLE_MODE="logit"
+# --- Configuration (overridable via env vars from experiments/parallel/launch.sh) ---
+N_LAYER="${N_LAYER:-12}"
+N_HEAD="${N_HEAD:-12}"
+N_EMBD="${N_EMBD:-768}"
+NUM_MODELS="${NUM_MODELS:-20}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+DATA_FRACTION="${DATA_FRACTION:-0.2}"
+OPTIMIZER="${OPTIMIZER:-hybrid}"
+ENSEMBLE_MODE="${ENSEMBLE_MODE:-logit}"
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"   # tokens per optimizer step
+# --compile-mode: inductor is fastest but requires H100; eager works on all GPUs
+COMPILE_MODE="${COMPILE_MODE:-eager}"
+# --val-every-n-steps: 0 = only at epoch boundary (fast). >0 gives denser val curves but much slower.
+VAL_EVERY_N_STEPS="${VAL_EVERY_N_STEPS:-0}"
 WANDB_GROUP="parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}"
 
 # --- Map array index to (strategy, model_idx) ---
@@ -70,6 +76,7 @@ esac
 
 RUN_ID="parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_model${MODEL_IDX}"
+FINAL_CKPT="checkpoints/${RUN_ID}/model_${MODEL_IDX}_epoch_${NUM_EPOCHS}.pt"
 
 echo "============================================================"
 echo "Parallel job (array $SLURM_ARRAY_TASK_ID)"
@@ -78,6 +85,12 @@ echo "  Model index: $MODEL_IDX of $NUM_MODELS"
 echo "  Run ID (shared dir): $RUN_ID"
 echo "  Wandb group: $WANDB_GROUP"
 echo "============================================================"
+
+# Skip if this model has already completed all epochs
+if [ -f "$FINAL_CKPT" ]; then
+    echo "SKIP: final checkpoint already exists: $FINAL_CKPT"
+    exit 0
+fi
 
 torchrun \
     --standalone \
@@ -93,9 +106,10 @@ torchrun \
     --optimizer=$OPTIMIZER \
     --ensemble-mode=$ENSEMBLE_MODE \
     --data-fraction=$DATA_FRACTION \
-    --val-every-n-steps=10 \
+    --val-every-n-steps=$VAL_EVERY_N_STEPS \
+    --total-batch-size=$TOTAL_BATCH_SIZE \
     --num-epochs-model-0=$NUM_EPOCHS \
-    --compile-mode=inductor \
+    --compile-mode=$COMPILE_MODE \
     --resume=$RUN_ID \
     --run=$RUN_NAME \
     --wandb_group=$WANDB_GROUP

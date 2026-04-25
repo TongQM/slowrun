@@ -51,9 +51,32 @@ def main():
                    help="Stop after this epoch (defaults to --num-epochs)")
     p.add_argument("--wandb-resume-id", type=str, default=None,
                    help="If set, resume an existing wandb run with this ID instead of creating a new one.")
+    p.add_argument("--skip-individual-val", action="store_true", default=False,
+                   help="Skip per-model val eval in replay (just compute ensemble val). "
+                        "Per-model val is already logged during training, so this saves ~Nx time.")
+    p.add_argument("--progress-file", type=str, default=None,
+                   help="JSON file recording {last_completed_epoch, wandb_run_id}. "
+                        "If it exists on startup, resume from last_completed_epoch+1 and reuse "
+                        "the stored wandb run id. Written atomically after each ensemble epoch.")
     args = p.parse_args()
     if args.end_epoch is None:
         args.end_epoch = args.num_epochs
+
+    # Resume from progress file if present
+    resumed_from = None
+    if args.progress_file and os.path.exists(args.progress_file):
+        with open(args.progress_file) as f:
+            prog = json.load(f)
+        last = int(prog.get("last_completed_epoch", 0))
+        resumed_from = last
+        # never redo completed epochs, but respect a higher CLI start-epoch
+        args.start_epoch = max(args.start_epoch, last + 1)
+        if args.wandb_resume_id is None and prog.get("wandb_run_id"):
+            args.wandb_resume_id = prog["wandb_run_id"]
+        if last >= args.end_epoch:
+            print(f"[resume] Progress file says epoch {last} already done "
+                  f"(>= end_epoch={args.end_epoch}); nothing to do.")
+            return
 
     # Load training config to recover model architecture
     config_path = os.path.join(args.checkpoint_dir, "config.json")
@@ -141,6 +164,9 @@ def main():
         wandb_kwargs["resume"] = "allow"
     run = wandb.init(**wandb_kwargs)
     print(f"Wandb run: {run.url}")
+    if resumed_from is not None:
+        print(f"[resume] Restarting after epoch {resumed_from}; "
+              f"replaying epochs {args.start_epoch}..{args.end_epoch}")
 
     # Define metric step axes (clean per-model curves in wandb)
     for i in range(args.num_models):
@@ -173,19 +199,20 @@ def main():
             models.append(m)
             del state_dict
 
-        # Per-model individual val eval
-        for i, m in enumerate(models):
-            indiv_loader = DataLoader(val_path, indiv_eval_B, MAX_SEQ_LEN,
-                                      device=device, seed=0, quiet=True)
-            with autocast_ctx:
-                vbpb, vloss = evaluate_bpb(m, indiv_loader, indiv_eval_steps, token_bytes)
-            print(f"  [model {i+1}] epoch {epoch}: val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
-            run.log({
-                f"model_{i+1}/val_loss": vloss,
-                f"model_{i+1}/val_bpb": vbpb,
-                f"model_{i+1}/epoch": epoch,
-                f"model_{i+1}/step": epoch * steps_per_epoch,
-            }, commit=True)
+        # Per-model individual val eval (skip if requested — use training-time per-model logs instead)
+        if not args.skip_individual_val:
+            for i, m in enumerate(models):
+                indiv_loader = DataLoader(val_path, indiv_eval_B, MAX_SEQ_LEN,
+                                          device=device, seed=0, quiet=True)
+                with autocast_ctx:
+                    vbpb, vloss = evaluate_bpb(m, indiv_loader, indiv_eval_steps, token_bytes)
+                print(f"  [model {i+1}] epoch {epoch}: val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
+                run.log({
+                    f"model_{i+1}/val_loss": vloss,
+                    f"model_{i+1}/val_bpb": vbpb,
+                    f"model_{i+1}/epoch": epoch,
+                    f"model_{i+1}/step": epoch * steps_per_epoch,
+                }, commit=True)
 
         # Ensemble val eval
         val_loader = DataLoader(val_path, ens_eval_B, MAX_SEQ_LEN,
@@ -203,6 +230,13 @@ def main():
             "ens/num_models": args.num_models,
             "ens/epoch": epoch,
         }, commit=True)
+
+        # Persist progress atomically (rename is atomic on POSIX)
+        if args.progress_file:
+            tmp = args.progress_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"last_completed_epoch": epoch, "wandb_run_id": run.id}, f)
+            os.replace(tmp, args.progress_file)
 
         del models
         if device.type == "cuda":

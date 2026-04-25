@@ -88,7 +88,13 @@ parser.add_argument("--optimizer", type=str, default="hybrid", choices=["hybrid"
 parser.add_argument("--completep", action="store_true", default=False,
                     help="Enable CompleteP: muP width scaling + 1/L depth scaling")
 parser.add_argument("--mup-base-width", type=int, default=256,
-                    help="Base width for muP LR scaling (only with --completep and --optimizer adamw)")
+                    help="Base n_embd for muP width scaling (init std, forward multipliers, AdamW LR).")
+parser.add_argument("--mup-base-depth", type=int, default=1,
+                    help="Base n_layer for CompleteP depth scaling (depth_scale = L_base/L). "
+                         "Default 1 gives 1/L (our historical behavior).")
+parser.add_argument("--no-mup-lr-scale", action="store_true", default=False,
+                    help="With --completep --optimizer adamw, skip matrix-LR width scaling "
+                         "(keep only the parameterization-based width scaling via init+forward mults).")
 parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
                     choices=["init", "init_shuffle"],
                     help="'init' = different model inits, same data order; "
@@ -287,6 +293,7 @@ class GPTConfig:
     dropout: float = 0.0
     completep: bool = False
     mup_base_width: int = 256
+    mup_base_depth: int = 1
     optimizer: str = "hybrid"
 
 def norm(x):
@@ -319,12 +326,16 @@ class CausalSelfAttention(nn.Module):
         # Attention gate: per-head gating to enable context-based no-op
         self.attn_gate_channels = 12
         self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
+        # CompleteP per-weight output multipliers (1.0 when completep off)
+        # qkv fan-in = d_model; out fan-in = n_head * head_dim = d_model
+        self.qkv_mult = 1.0
+        self.out_mult = 1.0
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
-        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
-        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+        q = (self.qkv_mult * self.c_q(x)).view(B, T, self.n_head, self.head_dim)
+        k = (self.qkv_mult * self.c_k(x)).view(B, T, self.n_kv_head, self.head_dim)
+        v = (self.qkv_mult * self.c_v(x)).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
             ve = ve.view(B, T, self.n_kv_head, self.head_dim)
             gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
@@ -336,20 +347,28 @@ class CausalSelfAttention(nn.Module):
         # Attention gate: per-head sigmoid gate
         y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate_channels])).unsqueeze(-1)
         y = y.contiguous().view(B, T, -1)
-        return self.resid_dropout(self.c_proj(y))
+        return self.resid_dropout(self.out_mult * self.c_proj(y))
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden = 256 * ((8 * config.n_embd // 3 + 255) // 256)
-        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)
-        self.c_fc = nn.Linear(config.n_embd, hidden, bias=False)
-        self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)
+        self.hidden = 256 * ((8 * config.n_embd // 3 + 255) // 256)
+        self.c_gate = nn.Linear(config.n_embd, self.hidden, bias=False)
+        self.c_fc = nn.Linear(config.n_embd, self.hidden, bias=False)
+        self.c_proj = nn.Linear(self.hidden, config.n_embd, bias=False)
         self.resid_dropout = nn.Dropout(config.dropout)
+        # CompleteP per-weight output multipliers (set to non-1 in GPT.__init__ when completep on)
+        # w1 = c_gate, w3 = c_fc (both fan-in = d_model); w2 = c_proj (fan-in = hidden_size)
+        self.w1_mult = 1.0
+        self.w3_mult = 1.0
+        self.w2_mult = 1.0
 
     def forward(self, x):
-        return self.resid_dropout(self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x)))
+        gate = self.w1_mult * self.c_gate(x)
+        up = self.w3_mult * self.c_fc(x)
+        out = self.w2_mult * self.c_proj(F.silu(gate) * up)
+        return self.resid_dropout(out)
 
 
 class Block(nn.Module):
@@ -373,13 +392,30 @@ class GPT(nn.Module):
         padded_vocab = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab != config.vocab_size:
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab}")
-        depth_scale = 1.0 / config.n_layer if config.completep else 1.0
+        # Depth scaling: L_base / L (reduces residual branch magnitude in deep models)
+        depth_scale = (config.mup_base_depth / config.n_layer) if config.completep else 1.0
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab, config.n_embd),
             "h": nn.ModuleList([Block(config, i, depth_scale=depth_scale) for i in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, padded_vocab, bias=False)
         self.output_multiplier = config.mup_base_width / config.n_embd if config.completep else 1.0
+
+        # CompleteP per-weight forward multipliers on attention and FFN (OLMo-style)
+        if config.completep:
+            d_base = config.mup_base_width
+            d = config.n_embd
+            # Attention: fan-in = d for q,k,v and c_proj
+            attn_mult = d_base / d
+            # FFN: hidden size formula is same at base width if we use 256*ceil(8*d/3/256)
+            # At d=d_base the formula gives hidden_base; we compute both
+            for block in self.transformer.h:
+                block.attn.qkv_mult = attn_mult
+                block.attn.out_mult = attn_mult
+                h_base = 256 * ((8 * d_base // 3 + 255) // 256)
+                block.mlp.w1_mult = d_base / d
+                block.mlp.w3_mult = d_base / d
+                block.mlp.w2_mult = h_base / block.mlp.hidden
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
@@ -403,20 +439,51 @@ class GPT(nn.Module):
     @torch.no_grad()
     def init_weights(self, convert_embed=True):
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+        # LM head: constant small std (no width scaling, readout special case)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
-        s = 3**0.5 * self.config.n_embd**-0.5
-        for block in self.transformer.h:
-            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-            torch.nn.init.zeros_(block.attn.c_proj.weight)
-            torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+
+        d = self.config.n_embd
+        if self.config.completep:
+            # CompleteP width-aware init for hidden weights.
+            # std(d) = std_base * sqrt(d_in / d_base), where
+            # std_base = std at d=d_base matches our historical uniform init:
+            #   historical uniform(-s,s) has std = s/sqrt(3) = 1/sqrt(d).
+            # At d=d_base, std_base = 1/sqrt(d_base). Thus for fan-in d:
+            #   std = (1/sqrt(d_base)) * sqrt(d / d_base) = sqrt(d) / d_base
+            # MLP w2 has fan-in = hidden_size; use that dim in the rule.
+            d_base = self.config.mup_base_width
+            h_base = 256 * ((8 * d_base // 3 + 255) // 256)
+            std_base = 1.0 / (d_base ** 0.5)
+
+            def std_for(d_in):
+                return std_base * ((d_in / d_base) ** 0.5)
+
+            for block in self.transformer.h:
+                torch.nn.init.normal_(block.attn.c_q.weight, mean=0.0, std=std_for(d))
+                torch.nn.init.normal_(block.attn.c_k.weight, mean=0.0, std=std_for(d))
+                torch.nn.init.normal_(block.attn.c_v.weight, mean=0.0, std=std_for(d))
+                torch.nn.init.zeros_(block.attn.c_proj.weight)  # keep zero (trivially OK)
+                torch.nn.init.normal_(block.mlp.c_gate.weight, mean=0.0, std=std_for(d))
+                torch.nn.init.normal_(block.mlp.c_fc.weight, mean=0.0, std=std_for(d))
+                torch.nn.init.zeros_(block.mlp.c_proj.weight)   # keep zero
+            for proj in self.ve_projs.values():
+                torch.nn.init.normal_(proj.weight, mean=0.0, std=std_for(d))
+        else:
+            # Historical slowrun init
+            s = 3**0.5 * d**-0.5
+            for block in self.transformer.h:
+                torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
+                torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+                torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+                torch.nn.init.zeros_(block.attn.c_proj.weight)
+                torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+                torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            for proj in self.ve_projs.values():
+                torch.nn.init.uniform_(proj.weight, -s, s)
+
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
-        for proj in self.ve_projs.values():
-            torch.nn.init.uniform_(proj.weight, -s, s)
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
@@ -460,8 +527,12 @@ class GPT(nn.Module):
 
         if self.config.optimizer == 'adamw':
             # Pure AdamW: AdamW for everything including matrix params
-            # muP width scaling: scale matrix LR inversely with width
-            matrix_lr = MATRIX_LR * (self.config.mup_base_width / self.config.n_embd) if self.config.completep else MATRIX_LR
+            # muP width scaling for AdamW matrix LR: scale by base_width/n_embd.
+            # Disabled by --no-mup-lr-scale (ablation: pure parameterization-based scaling).
+            if self.config.completep and not args.no_mup_lr_scale:
+                matrix_lr = MATRIX_LR * (self.config.mup_base_width / self.config.n_embd)
+            else:
+                matrix_lr = MATRIX_LR
             param_groups = [
                 dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
                 dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
@@ -1518,6 +1589,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
     compiled_models = {}  # idx -> compiled model (or same as orig if --no-compile)
     optimizers = {}
     loaders = {}
+    resume_epoch = {}     # idx -> last completed epoch (0 = fresh)
     for i in active_indices:
         seed = seeds[i]
         torch.manual_seed(seed)
@@ -1527,6 +1599,22 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
             m = GPT(config)
         m.to_empty(device=device)
         m.init_weights()
+
+        # Resume: find the latest model_{i}_epoch_{k}.pt in checkpoint_dir
+        latest = 0
+        for k in range(num_epochs, 0, -1):
+            cp = os.path.join(checkpoint_dir, f"model_{i}_epoch_{k}.pt")
+            if os.path.exists(cp):
+                latest = k
+                break
+        if latest > 0:
+            cp = os.path.join(checkpoint_dir, f"model_{i}_epoch_{latest}.pt")
+            state = torch.load(cp, map_location=device, weights_only=True)
+            m.load_state_dict(state)
+            del state
+            print0(f"  [model {i}] Resumed from {cp} (epoch {latest})")
+        resume_epoch[i] = latest
+
         models[i] = m
         compiled_models[i] = maybe_compile(m)
         optimizers[i] = m.setup_optimizer()
@@ -1538,6 +1626,11 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                                 device=device, seed=data_seed, quiet=True,
                                 reshuffle_per_epoch=True,
                                 data_fraction=args.data_fraction)
+        # Fast-forward the DataLoader to the resumed epoch so shuffle seeding
+        # continues correctly. We advance epoch and reshuffle; pos stays at 0.
+        if latest > 0:
+            loaders[i].epoch = latest + 1
+            loaders[i]._shuffle_and_shard()
 
     # Batch and iteration accounting (same for all models since same config)
     tokens_per_fwdbwd = args.device_batch_size * MAX_SEQ_LEN * ddp_world_size
@@ -1582,6 +1675,8 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "dropout": config.dropout,
                 "completep": config.completep,
                 "mup_base_width": config.mup_base_width,
+                "mup_base_depth": config.mup_base_depth,
+                "no_mup_lr_scale": args.no_mup_lr_scale,
                 "total_params": total_params,
             },
             "optimizer": {
@@ -1647,6 +1742,10 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
     # Per-model optim-step counters (each model has its own training progress)
     per_model_step = [0] * N
     step_global = 0
+    # Advance step counters for resumed models so LR schedule stays correct
+    for i in active_indices:
+        if resume_epoch[i] > 0:
+            per_model_step[i] = resume_epoch[i] * steps_per_epoch_optim
 
     # EMA smoothing per model
     smooth_train_loss = [0.0] * N
@@ -1707,6 +1806,8 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         # ===== Sequential training: model i trains full epoch, then model i+1 =====
         # Per-step individual val eval happens inline. Ensemble val is only at epoch boundary.
         for i in active_indices:
+            if epoch <= resume_epoch[i]:
+                continue  # already completed in a prior run
             m = compiled_models[i]
             opt = optimizers[i]
             loader = loaders[i]
@@ -1788,9 +1889,11 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
             print0(f"  [ensemble] epoch {epoch} val_bpb={ens_bpb:.6f} val_loss={ens_loss:.6f}")
             ensemble_results.append({"epoch": epoch, "val_bpb": ens_bpb, "val_loss": ens_loss})
 
-        # ===== Save per-epoch checkpoints =====
+        # ===== Save per-epoch checkpoints (skip for models whose epoch was resumed past) =====
         if master_process:
             for i in active_indices:
+                if epoch <= resume_epoch[i]:
+                    continue
                 ckpt_path = os.path.join(checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
                 torch.save(models[i].state_dict(), ckpt_path)
             # Save progress summary
@@ -1865,6 +1968,8 @@ def main():
                      "config": {"optimizer": args.optimizer, "completep": args.completep,
                                 "ensemble_type": args.ensemble_type, "ensemble_mode": args.ensemble_mode,
                                 "mup_base_width": args.mup_base_width,
+                                "mup_base_depth": args.mup_base_depth,
+                                "no_mup_lr_scale": args.no_mup_lr_scale,
                                 "n_layer": DEPTH, "n_embd": N_EMBD, "n_head": N_HEAD,
                                 "num_models": args.num_models, "num_epochs": args.num_epochs,
                                 "dropout": args.dropout, "weight_decay": WEIGHT_DECAY}}
@@ -1894,7 +1999,8 @@ def main():
     token_bytes = torch.tensor(token_bytes_list, dtype=torch.int32, device=device)
 
     config = GPTConfig(vocab_size=vocab_size, dropout=args.dropout,
-                       completep=args.completep, mup_base_width=args.mup_base_width,
+                       completep=args.completep,
+                       mup_base_width=args.mup_base_width, mup_base_depth=args.mup_base_depth,
                        optimizer=args.optimizer)
 
     # Print config
@@ -1911,7 +2017,11 @@ def main():
         print0(f"  dupe_layers: disabled (dupe_fraction={args.dupe_fraction})")
     print0(f"  optimizer={args.optimizer}, ensemble_type={args.ensemble_type}, ensemble_mode={args.ensemble_mode}")
     if args.completep:
-        print0(f"  completep=True, mup_base_width={args.mup_base_width}, depth_scale={1.0/DEPTH:.4f}, output_mult={args.mup_base_width/N_EMBD:.4f}")
+        _d_scale = args.mup_base_depth / DEPTH
+        _o_mult = args.mup_base_width / N_EMBD
+        print0(f"  completep=True: d_base={args.mup_base_width} (output_mult={_o_mult:.4f}), "
+               f"L_base={args.mup_base_depth} (depth_scale={_d_scale:.4f}), "
+               f"no_mup_lr_scale={args.no_mup_lr_scale}")
     print0(f"  checkpoint_dir={checkpoint_dir}")
     print0(f"{'='*60}")
 
