@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 We study **multi-epoch training dynamics** in the data-limited regime: what happens when you train on fixed data (100M tokens) with unlimited compute? The paper (Appendix B.1) investigates:
 - Whether ensembling over model inits and data order improves performance at fixed FLOPs
 - Optimal model size vs dataset size in multi-epoch training
-- CompleteP (muP + 1/L depth scaling) for width/depth transfer
+- CompleteP (muP + L_base/L depth scaling) for width/depth transfer
 - Comparing Adam vs Muon optimizers under these conditions
 
 All experiments use `unlimited/train.py` as the training backbone, modified to support these experimental axes.
@@ -43,10 +43,10 @@ Distillation is removed in our fork — models are fully independent. Checkpoint
 | `--ensemble-type {init,init_shuffle}` | `init` → π_k (shared cross-epoch shuffle across models); `init_shuffle` → π_{i,k} (independent per model+epoch). Both reshuffle data per epoch; multiplicative seeding so all (model, epoch) pairs are independent. |
 | `--ensemble-mode {prob,logit}` | Probability vs logit averaging at eval time (default `logit`) |
 | `--optimizer {hybrid,muon,adamw}` | Optimizer selection for comparison |
-| `--completep` | Enable fuller CompleteP: width-aware init std, FFN/attention forward multipliers, 1/L depth scaling, output multiplier |
-| `--mup-base-width d_base` | Reference `n_embd` for CompleteP (default 256) |
-| `--mup-base-depth L_base` | Reference `n_layer` for depth scaling `L_base/L` (default 1 → `1/L`) |
-| `--no-mup-lr-scale` | Ablation: under `--completep --optimizer adamw`, skip matrix-LR width scaling (rely on parameterization alone) |
+| `--completep` | Enable fuller CompleteP: width-aware init std, FFN/attention forward multipliers, depth scaling, attention scale, output multiplier |
+| `--mup-base-width d_base` | Reference `n_embd` for CompleteP (default 768) |
+| `--mup-base-depth L_base` | Reference `n_layer` for depth scaling `L_base/L` (default 12) |
+| `--mup-base-head-dim d_head_base` | Reference attention head dimension for CompleteP softmax scaling (default 64) |
 | `--num-models N` | Ensemble size (virtual size used for seed derivation in single-model mode) |
 | `--single-model-idx i` | Train only model `i` of the N-ensemble (used by path b parallel jobs) |
 | `--val-every-n-steps N` | Run individual val eval every N optimizer steps (default 0 → only at epoch boundaries) |
@@ -130,12 +130,24 @@ Each run also saves a full `config.json` to its checkpoint dir with model archit
 - SU pricing: V100 = 1 SU/GPU-hour, L40S = 1 SU/GPU-hour, H100 = 2 SU/GPU-hour. For our d12/df=0.2 workload, H100+inductor (~15 min/model × 2) ≈ 0.5 SU/model; V100+eager (~100 min/model × 1) ≈ 1.7 SU/model. **H100 is ~3× cheaper per model in SU despite 2× hourly rate.**
 
 ### CompleteP status
-Our `--completep` now implements the full OLMo-style parameterization (see `olmo-tacc-completeP/` reference):
-- Width-aware init std: `std(d) = (1/sqrt(d_base)) × sqrt(d/d_base)` for Q/K/V/MLP hidden weights; constant small std for LM head (readout); `c_proj` weights stay zero-initialized
-- Per-weight forward multipliers: attention Q/K/V output and `c_proj` output × `d_base/d`; FFN `w1,w3 × d_base/d`, `w2 × h_base/h`
-- Residual branch × `L_base/L` (1/L by default since `mup_base_depth=1`)
-- Logit output multiplier × `d_base/d` after LM head
-- AdamW matrix LR × `d_base/d` (can ablate via `--no-mup-lr-scale`)
+Our `--completep` matches the spec given by our advisor — width-aware init combined with output-projection forward multipliers, so the effective output variance is width-independent at every layer:
+- **Init** (truncated normal, ±3σ, `init_std = 0.02`):
+  - Embedding: constant `init_std` (no width scaling).
+  - Q, K, V (fan-in = `d`): `init_std × sqrt(d / d_base)`.
+  - Attn `c_proj` (fan-in = `d`): `init_std × sqrt(d / d_base)`.
+  - FFN `c_gate`, `c_fc` (fan-in = `d`): `init_std × sqrt(d / d_base)`.
+  - FFN `c_proj` (fan-in = `hidden`): `init_std × sqrt(hidden / hidden_base)`.
+  - LM head: constant `init_std` (no width scaling).
+  - At `d = d_base` every `sqrt` factor is 1 → all weights init at `init_std`.
+- **Forward multipliers**:
+  - Attn `c_proj` output × `d_base / d`.
+  - Attn softmax scale: `sqrt(d_head_base) / d_head` (collapses to standard `1/sqrt(d_head)` at constant head_dim).
+  - FFN `c_gate`, `c_fc` outputs × `d_base / d`.
+  - FFN `c_proj` output × `hidden_base / hidden`.
+  - LM head logit × `d_base / d` (equivalent to multiplying input `h` by `d_base / d`).
+  - Residual branch × `L_base / L` (default `12 / L`).
+  - **Q, K, V have no forward multiplier** — width adjustment is in the init only.
+- **Single LR across widths** — `init × √(d/d_base)` and forward × `d_base/d` cancel: `Var(output) ∝ init_std² × (d/d_base) × (d_base/d)² × d = init_std² × d_base`, width-independent.
 
 ## Data Efficiency Metric
 
@@ -171,7 +183,7 @@ legacy/                # upstream benchmark tracks — not the research focus
 - n_layer/2 encoder + n_layer/2 decoder layers with U-Net skip connections
 - RoPE, sliding window attention (SSSL pattern), Flash Attention 2/3 with SDPA fallback
 - SiLU-gated MLP, value embedding (ResFormer on alternating layers), logit soft-capping
-- Hybrid MuonAdamW optimizer with ZeRO-2 sharding
+- Pure AdamW (default) with ZeRO-2 sharding; hybrid MuonAdamW and pure Muon also available via `--optimizer`
 - Light regularization by default: `dropout=0.0`, `weight_decay=0.1` (slowrun competition defaults were `0.1`/`1.3`; we relaxed to observe multi-epoch overfit)
 
 ### No Tests or CI
@@ -186,7 +198,7 @@ See `experiments/README.md` for full details. Summary:
 - **Cross-epoch shuffle semantics** per advisor: `init` → shared π_k, `init_shuffle` → independent π_{i,k}; multiplicative seed `seed*10000+epoch` so pairs are independent
 - **Fuller CompleteP**: width-aware init std, attention + FFN per-weight forward multipliers, `L_base/L` residual scaling, output multiplier, optional AdamW LR scaling (ablatable)
 - **Logit vs probability** ensemble averaging (`--ensemble-mode`)
-- **Three-way optimizer**: `hybrid` (Muon matrices + AdamW others), `muon` (Muon for all 2D), `adamw`
+- **Three-way optimizer**: `adamw` (default, pure AdamW), `hybrid` (Muon matrices + AdamW others), `muon` (Muon for all 2D)
 - **Attention backends**: FA3 → FA2 → PyTorch SDPA fallback
 - **Compile modes**: `eager`, `aot_eager`, `inductor` (only H100/torch2.8)
 - **Periodic val eval**: `--val-every-n-steps` for finer-grained val loss curves during training

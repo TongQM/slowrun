@@ -25,7 +25,7 @@ sbatch experiments/sync/run.sh
 # path (b): submits 10-task training array + dependent 2-task replay array
 bash experiments/parallel/launch.sh
 
-# multi-size sweep (CompleteP: muP width + 1/L depth scaling)
+# multi-size sweep (CompleteP: muP width + L_base/L depth scaling)
 python experiments/sync/sweep.py \
     --model-sizes 12:12:768,20:10:1280,26:14:1792 \
     --num-models 5 --num-epochs 12

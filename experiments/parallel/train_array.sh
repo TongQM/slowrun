@@ -47,7 +47,7 @@ N_EMBD="${N_EMBD:-768}"
 NUM_MODELS="${NUM_MODELS:-20}"
 NUM_EPOCHS="${NUM_EPOCHS:-20}"
 DATA_FRACTION="${DATA_FRACTION:-0.2}"
-OPTIMIZER="${OPTIMIZER:-hybrid}"
+OPTIMIZER="${OPTIMIZER:-adamw}"
 ENSEMBLE_MODE="${ENSEMBLE_MODE:-logit}"
 TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"   # tokens per optimizer step
 # --compile-mode: inductor is fastest but requires H100; eager works on all GPUs

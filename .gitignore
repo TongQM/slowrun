@@ -8,5 +8,7 @@ tiny_ckpts/
 .conda_env/
 __pycache__/
 experiments/logs/
+data_eff/
 olmo-tacc-completeP/
+LLM-width-depth-scaling-OLMo/
 .DS_Store

@@ -81,20 +81,20 @@ parser.add_argument("--ema-start-frac", type=float, default=0.90,
                     help="Fraction of training after which to start EMA tracking")
 parser.add_argument("--ensemble-mode", type=str, default="logit", choices=["prob", "logit"],
                     help="Ensemble averaging method: 'prob' averages softmax probabilities, 'logit' averages raw logits")
-parser.add_argument("--optimizer", type=str, default="hybrid", choices=["hybrid", "muon", "adamw"],
-                    help="'hybrid' = Muon for matrices + AdamW for rest (default), "
-                         "'muon' = Muon for all trainable params, "
-                         "'adamw' = pure AdamW for all params")
+parser.add_argument("--optimizer", type=str, default="adamw", choices=["hybrid", "muon", "adamw"],
+                    help="'adamw' = pure AdamW for all params (default; what CompleteP HP-transfer claims target), "
+                         "'hybrid' = Muon for matrices + AdamW for rest, "
+                         "'muon' = Muon for all trainable params")
 parser.add_argument("--completep", action="store_true", default=False,
-                    help="Enable CompleteP: muP width scaling + 1/L depth scaling")
-parser.add_argument("--mup-base-width", type=int, default=256,
-                    help="Base n_embd for muP width scaling (init std, forward multipliers, AdamW LR).")
-parser.add_argument("--mup-base-depth", type=int, default=1,
+                    help="Enable CompleteP: muP width scaling + L_base/L depth scaling")
+parser.add_argument("--mup-base-width", type=int, default=768,
+                    help="Base n_embd for muP width scaling (init std and forward multipliers).")
+parser.add_argument("--mup-base-depth", type=int, default=12,
                     help="Base n_layer for CompleteP depth scaling (depth_scale = L_base/L). "
-                         "Default 1 gives 1/L (our historical behavior).")
-parser.add_argument("--no-mup-lr-scale", action="store_true", default=False,
-                    help="With --completep --optimizer adamw, skip matrix-LR width scaling "
-                         "(keep only the parameterization-based width scaling via init+forward mults).")
+                         "Default 12 keeps the d12 base model unscaled.")
+parser.add_argument("--mup-base-head-dim", type=int, default=64,
+                    help="Reference d_head for CompleteP attention scale (sqrt(d_head_base) / d_head). "
+                         "At constant head_dim across widths this collapses to the standard 1/sqrt(d_head).")
 parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
                     choices=["init", "init_shuffle"],
                     help="'init' = different model inits, same data order; "
@@ -143,6 +143,13 @@ def maybe_compile(model):
 # Workaround for torch 2.8 inductor dtype bug in pad_mm benchmark pass
 import torch._inductor.config as _inductor_config
 _inductor_config.shape_padding = False
+
+# Bump dynamo recompile cache so adamw_step_fused (compiled, fullgraph) can
+# handle one entry per distinct param shape across all optimizer param groups.
+# Pure-AdamW has many groups, each with multiple shapes; default limit (8)
+# triggers FailOnRecompileLimitHit during the first opt.step.
+import torch._dynamo.config as _dynamo_config
+_dynamo_config.cache_size_limit = 256
 
 if args.output_json and not args.save_result:
     args.save_result = args.output_json
@@ -261,18 +268,21 @@ _fa2 = None if _fa3 is not None else _load_fa2()
 _use_sdpa = (_fa3 is None and _fa2 is None)
 
 
-def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
+def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1), softmax_scale=None):
     """Flash Attention for training. Prefers FA3 > FA2 > PyTorch SDPA.
     q, k, v: (B, T, H, D) for FA3/FA2; transposed internally for SDPA.
     """
     if _fa3 is not None:
-        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size,
+                                    softmax_scale=softmax_scale)
     if _fa2 is not None:
-        return _fa2(q, k, v, causal=causal, window_size=window_size)
+        return _fa2(q, k, v, causal=causal, window_size=window_size,
+                    softmax_scale=softmax_scale)
     # SDPA fallback: expects (B, H, T, D)
     q_s, k_s, v_s = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     # SDPA sliding window: only supported in torch >= 2.5 via enable_gqa; approximate with full attention if window requested
-    out = F.scaled_dot_product_attention(q_s, k_s, v_s, is_causal=causal)
+    out = F.scaled_dot_product_attention(q_s, k_s, v_s, is_causal=causal,
+                                         scale=softmax_scale)
     return out.transpose(1, 2)  # back to (B, T, H, D)
 
 flash_attn = SimpleNamespace(flash_attn_func=flash_attn_func)
@@ -292,9 +302,10 @@ class GPTConfig:
     window_pattern: str = WINDOW_PATTERN
     dropout: float = 0.0
     completep: bool = False
-    mup_base_width: int = 256
-    mup_base_depth: int = 1
-    optimizer: str = "hybrid"
+    mup_base_width: int = 768
+    mup_base_depth: int = 12
+    mup_base_head_dim: int = 64
+    optimizer: str = "adamw"
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -326,16 +337,17 @@ class CausalSelfAttention(nn.Module):
         # Attention gate: per-head gating to enable context-based no-op
         self.attn_gate_channels = 12
         self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
-        # CompleteP per-weight output multipliers (1.0 when completep off)
-        # qkv fan-in = d_model; out fan-in = n_head * head_dim = d_model
-        self.qkv_mult = 1.0
+        # CompleteP forward multipliers (1.0/default attention scale when completep off).
+        # Per spec: Q/K/V have NO forward multiplier — width adjustment is in init only.
+        # Only c_proj output gets the d_base/d multiplier.
         self.out_mult = 1.0
+        self.softmax_scale = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
-        q = (self.qkv_mult * self.c_q(x)).view(B, T, self.n_head, self.head_dim)
-        k = (self.qkv_mult * self.c_k(x)).view(B, T, self.n_kv_head, self.head_dim)
-        v = (self.qkv_mult * self.c_v(x)).view(B, T, self.n_kv_head, self.head_dim)
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
             ve = ve.view(B, T, self.n_kv_head, self.head_dim)
             gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
@@ -343,7 +355,8 @@ class CausalSelfAttention(nn.Module):
         cos, sin = cos_sin
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
-        y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size,
+                                       softmax_scale=self.softmax_scale)
         # Attention gate: per-head sigmoid gate
         y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate_channels])).unsqueeze(-1)
         y = y.contiguous().view(B, T, -1)
@@ -400,21 +413,27 @@ class GPT(nn.Module):
         })
         self.lm_head = nn.Linear(config.n_embd, padded_vocab, bias=False)
         self.output_multiplier = config.mup_base_width / config.n_embd if config.completep else 1.0
+        self.ve_multiplier = self.output_multiplier
 
-        # CompleteP per-weight forward multipliers on attention and FFN (OLMo-style)
+        # CompleteP per-weight forward multipliers (per advisor's spec):
+        #   Attention w_out (c_proj):  d_base / d
+        #   Attention softmax scale:   sqrt(d_head_base) / d_head
+        #   FFN w1, w3 (c_gate, c_fc): d_base / d         (fan-in = d)
+        #   FFN w2 (c_proj):           hidden_base / hidden  (fan-in = hidden)
+        # Q/K/V intentionally have NO forward multiplier — they only carry the
+        # width-aware init. Combined with the init scaling, effective output
+        # variance is width-independent at every layer.
         if config.completep:
             d_base = config.mup_base_width
             d = config.n_embd
-            # Attention: fan-in = d for q,k,v and c_proj
-            attn_mult = d_base / d
-            # FFN: hidden size formula is same at base width if we use 256*ceil(8*d/3/256)
-            # At d=d_base the formula gives hidden_base; we compute both
+            h_base = 256 * ((8 * d_base // 3 + 255) // 256)
+            out_mult = d_base / d
+            softmax_scale = (config.mup_base_head_dim ** 0.5) / (config.n_embd // config.n_head)
             for block in self.transformer.h:
-                block.attn.qkv_mult = attn_mult
-                block.attn.out_mult = attn_mult
-                h_base = 256 * ((8 * d_base // 3 + 255) // 256)
-                block.mlp.w1_mult = d_base / d
-                block.mlp.w3_mult = d_base / d
+                block.attn.out_mult = out_mult
+                block.attn.softmax_scale = softmax_scale
+                block.mlp.w1_mult = out_mult
+                block.mlp.w3_mult = out_mult
                 block.mlp.w2_mult = h_base / block.mlp.hidden
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
@@ -438,38 +457,38 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def init_weights(self, convert_embed=True):
-        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
-        # LM head: constant small std (no width scaling, readout special case)
-        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
-
         d = self.config.n_embd
         if self.config.completep:
-            # CompleteP width-aware init for hidden weights.
-            # std(d) = std_base * sqrt(d_in / d_base), where
-            # std_base = std at d=d_base matches our historical uniform init:
-            #   historical uniform(-s,s) has std = s/sqrt(3) = 1/sqrt(d).
-            # At d=d_base, std_base = 1/sqrt(d_base). Thus for fan-in d:
-            #   std = (1/sqrt(d_base)) * sqrt(d / d_base) = sqrt(d) / d_base
-            # MLP w2 has fan-in = hidden_size; use that dim in the rule.
+            # CompleteP init per advisor's spec.
+            # Embedding & LM head: constant init_std (no width scaling).
+            # Hidden matrices with fan-in = d: std = init_std × sqrt(d / d_base).
+            # FFN w2 (fan-in = hidden):       std = init_std × sqrt(hidden / hidden_base).
+            # At d = d_base every sqrt factor is 1 → all weights init at init_std.
+            init_std = 0.02
             d_base = self.config.mup_base_width
             h_base = 256 * ((8 * d_base // 3 + 255) // 256)
-            std_base = 1.0 / (d_base ** 0.5)
 
-            def std_for(d_in):
-                return std_base * ((d_in / d_base) ** 0.5)
+            def trunc_normal_(weight, std):
+                torch.nn.init.trunc_normal_(weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
 
+            std_d = init_std * ((d / d_base) ** 0.5)
+            trunc_normal_(self.transformer.wte.weight, init_std)
+            trunc_normal_(self.lm_head.weight, init_std)
             for block in self.transformer.h:
-                torch.nn.init.normal_(block.attn.c_q.weight, mean=0.0, std=std_for(d))
-                torch.nn.init.normal_(block.attn.c_k.weight, mean=0.0, std=std_for(d))
-                torch.nn.init.normal_(block.attn.c_v.weight, mean=0.0, std=std_for(d))
-                torch.nn.init.zeros_(block.attn.c_proj.weight)  # keep zero (trivially OK)
-                torch.nn.init.normal_(block.mlp.c_gate.weight, mean=0.0, std=std_for(d))
-                torch.nn.init.normal_(block.mlp.c_fc.weight, mean=0.0, std=std_for(d))
-                torch.nn.init.zeros_(block.mlp.c_proj.weight)   # keep zero
+                trunc_normal_(block.attn.c_q.weight, std_d)
+                trunc_normal_(block.attn.c_k.weight, std_d)
+                trunc_normal_(block.attn.c_v.weight, std_d)
+                trunc_normal_(block.attn.c_proj.weight, std_d)
+                trunc_normal_(block.mlp.c_gate.weight, std_d)
+                trunc_normal_(block.mlp.c_fc.weight, std_d)
+                std_h = init_std * ((block.mlp.hidden / h_base) ** 0.5)
+                trunc_normal_(block.mlp.c_proj.weight, std_h)
             for proj in self.ve_projs.values():
-                torch.nn.init.normal_(proj.weight, mean=0.0, std=std_for(d))
+                trunc_normal_(proj.weight, std_d)
         else:
             # Historical slowrun init
+            torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+            torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
             s = 3**0.5 * d**-0.5
             for block in self.transformer.h:
                 torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
@@ -526,13 +545,9 @@ class GPT(nn.Module):
         skip_params = [self.skip_weights]
 
         if self.config.optimizer == 'adamw':
-            # Pure AdamW: AdamW for everything including matrix params
-            # muP width scaling for AdamW matrix LR: scale by base_width/n_embd.
-            # Disabled by --no-mup-lr-scale (ablation: pure parameterization-based scaling).
-            if self.config.completep and not args.no_mup_lr_scale:
-                matrix_lr = MATRIX_LR * (self.config.mup_base_width / self.config.n_embd)
-            else:
-                matrix_lr = MATRIX_LR
+            # Pure AdamW: AdamW for everything including matrix params.
+            # CompleteP handles width scaling entirely via init + forward multipliers,
+            # so the matrix LR is width-invariant.
             param_groups = [
                 dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
                 dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
@@ -540,7 +555,7 @@ class GPT(nn.Module):
                 dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
                 dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
                 dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
-                dict(kind='adamw', params=matrix_params, lr=matrix_lr, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
+                dict(kind='adamw', params=matrix_params, lr=MATRIX_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
             ]
         elif self.config.optimizer == 'muon':
             # Pure Muon: Muon for everything (matrix params, embeddings, LM head)
@@ -584,7 +599,7 @@ class GPT(nn.Module):
             if 0 <= j < self.encoder_layers:
                 x = x + self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
+            ve = self.ve_multiplier * self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
         return x
 
@@ -598,7 +613,7 @@ class GPT(nn.Module):
         encoder_outputs = []
         for i in range(self.encoder_layers):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
+            ve = self.ve_multiplier * self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
             encoder_outputs.append(x)
 
@@ -1676,7 +1691,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "completep": config.completep,
                 "mup_base_width": config.mup_base_width,
                 "mup_base_depth": config.mup_base_depth,
-                "no_mup_lr_scale": args.no_mup_lr_scale,
+                "mup_base_head_dim": config.mup_base_head_dim,
                 "total_params": total_params,
             },
             "optimizer": {
@@ -1969,7 +1984,7 @@ def main():
                                 "ensemble_type": args.ensemble_type, "ensemble_mode": args.ensemble_mode,
                                 "mup_base_width": args.mup_base_width,
                                 "mup_base_depth": args.mup_base_depth,
-                                "no_mup_lr_scale": args.no_mup_lr_scale,
+                                "mup_base_head_dim": args.mup_base_head_dim,
                                 "n_layer": DEPTH, "n_embd": N_EMBD, "n_head": N_HEAD,
                                 "num_models": args.num_models, "num_epochs": args.num_epochs,
                                 "dropout": args.dropout, "weight_decay": WEIGHT_DECAY}}
@@ -2001,6 +2016,7 @@ def main():
     config = GPTConfig(vocab_size=vocab_size, dropout=args.dropout,
                        completep=args.completep,
                        mup_base_width=args.mup_base_width, mup_base_depth=args.mup_base_depth,
+                       mup_base_head_dim=args.mup_base_head_dim,
                        optimizer=args.optimizer)
 
     # Print config
@@ -2021,7 +2037,7 @@ def main():
         _o_mult = args.mup_base_width / N_EMBD
         print0(f"  completep=True: d_base={args.mup_base_width} (output_mult={_o_mult:.4f}), "
                f"L_base={args.mup_base_depth} (depth_scale={_d_scale:.4f}), "
-               f"no_mup_lr_scale={args.no_mup_lr_scale}")
+               f"head_dim_base={args.mup_base_head_dim}")
     print0(f"  checkpoint_dir={checkpoint_dir}")
     print0(f"{'='*60}")
 

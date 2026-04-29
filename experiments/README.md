@@ -49,15 +49,17 @@ Both modes use cross-epoch shuffling (data order changes per epoch). The differe
 - `init_shuffle` → **π_{i,k}** (independent schedules): each model uses `data_seed=42+i` so every (model, epoch) pair has its own unique permutation. Init AND data order diverge across models.
 
 ### CompleteP (`--completep`)
-Enables muP width scaling + 1/L depth scaling:
-- **1/L depth scaling**: each Block's attn and MLP outputs are multiplied by `1/n_layer` before the residual add. This is separate from `resid_lambdas` (which scale the residual stream before each block).
-- **Output multiplier**: logits are scaled by `mup_base_width / n_embd` before soft-capping. Default `mup_base_width=256` (`--mup-base-width`).
-- **muP LR scaling** (AdamW only): when `--optimizer adamw --completep`, matrix param LR is scaled by `base_width / n_embd`. Muon doesn't need this (orthogonalization is width-invariant).
+Matches the spec from advisor — width-aware init combined with output-projection forward multipliers, designed so `Var(output)` is width-independent (single LR transfers).
+- **Init** (truncated normal, ±3σ, `init_std = 0.02`): embedding and LM head use constant `init_std` (no width scaling). Q/K/V, attn `c_proj`, FFN `c_gate`/`c_fc`, and `ve_projs` use `init_std × sqrt(d / mup_base_width)` (fan-in = `d`). FFN `c_proj` uses `init_std × sqrt(hidden / hidden_base)` (fan-in = `hidden`). At `d == mup_base_width` every `sqrt` factor is 1.
+- **Forward multipliers**: attn `c_proj × d_base/d`; FFN `c_gate, c_fc × d_base/d`; FFN `c_proj × hidden_base/hidden`. **Q/K/V have no forward multiplier** — only the init scaling. LM head logits × `d_base/d`.
+- **Depth scaling**: each Block's attn and MLP outputs are multiplied by `mup_base_depth / n_layer` before the residual add. Default base depth 12.
+- **Attention scale**: `sqrt(mup_base_head_dim) / head_dim` instead of `1 / sqrt(head_dim)`. At constant head_dim (our setup) this collapses to the default.
+- **No matrix-LR rescaling**: width handling lives entirely in init + forward multipliers; AdamW matrix LR is width-invariant. Train all widths with the same LR.
 
 ### Optimizer Selection (`--optimizer {hybrid,muon,adamw}`)
-- `hybrid` (default): Muon for matrix params + AdamW for embeddings, scalars, LM head
+- `adamw` (default): pure AdamW for all parameters. CompleteP HP-transfer claims target this optimizer, so it's the right baseline for width/depth experiments.
+- `hybrid`: Muon for matrix params + AdamW for embeddings, scalars, LM head
 - `muon`: Muon for all trainable 2D+ params (matrices, embeddings, LM head); AdamW for 1D scalars only
-- `adamw`: pure AdamW for all parameters
 
 ### Orchestrator: `experiments/sync/sweep.py`
 For each model size, launches up to 3 `unlimited/train.py` runs:
@@ -72,12 +74,12 @@ Model sizes are specified as comma-separated `layer:head:embd` triples.
 python experiments/sync/sweep.py \
     --model-sizes 12:12:768 \
     --num-models 5 --num-epochs 12 \
-    --optimizer hybrid --nproc 8
+    --optimizer adamw --nproc 8
 
 # Multi-size sweep (muP width/depth transfer)
 python experiments/sync/sweep.py \
     --model-sizes 12:12:768,20:10:1280,26:14:1792 \
     --num-models 5 --num-epochs 12 \
-    --optimizer hybrid --nproc 8 \
+    --optimizer adamw --nproc 8 \
     --wandb-group completep_sweep
 ```

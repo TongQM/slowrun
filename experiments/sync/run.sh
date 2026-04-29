@@ -42,7 +42,7 @@ N_EMBD=768
 NUM_MODELS=5
 NUM_EPOCHS=30              # more epochs to study multi-epoch dynamics
 DATA_FRACTION=0.2          # 20M tokens per epoch (20% of 100M)
-OPTIMIZER="hybrid"
+OPTIMIZER="adamw"
 ENSEMBLE_MODE="logit"
 WANDB_GROUP="baseline_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}"
 

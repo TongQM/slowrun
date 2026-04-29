@@ -7,7 +7,7 @@ For each model size, launches up to 3 ensemble strategy runs:
   3. Init+shuffle ensemble: --num-models N --ensemble-type init_shuffle
 
 Model sizes are specified as comma-separated "layer:head:embd" triples.
-All runs use CompleteP parametrization (muP width scaling + 1/L depth scaling).
+All runs use CompleteP parametrization (muP width scaling + L_base/L depth scaling).
 
 Usage:
     # Single node, 8 GPUs (default)
@@ -65,6 +65,8 @@ def build_cmd(args, n_layer, n_head, n_embd, num_models, ensemble_type, run_suff
         f"--num-epochs={args.num_epochs}",
         f"--optimizer={args.optimizer}",
         f"--mup-base-width={args.mup_base_width}",
+        f"--mup-base-depth={args.mup_base_depth}",
+        f"--mup-base-head-dim={args.mup_base_head_dim}",
         f"--weight-decay={args.weight_decay}",
         f"--dropout={args.dropout}",
         f"--ensemble-mode={args.ensemble_mode}",
@@ -83,7 +85,7 @@ def build_cmd(args, n_layer, n_head, n_embd, num_models, ensemble_type, run_suff
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CompleteP orchestrator: run ensemble experiments with muP + 1/L depth scaling")
+        description="CompleteP orchestrator: run ensemble experiments with muP + L_base/L depth scaling")
 
     # Model config — supports multiple sizes
     parser.add_argument("--model-sizes", type=str, required=True,
@@ -96,7 +98,7 @@ def main():
     parser.add_argument("--num-epochs", type=int, default=12)
     parser.add_argument("--num-epochs-model-0", type=int, default=None,
                         help="Epochs for first model (defaults to --num-epochs)")
-    parser.add_argument("--optimizer", type=str, default="hybrid",
+    parser.add_argument("--optimizer", type=str, default="adamw",
                         choices=["hybrid", "muon", "adamw"])
     parser.add_argument("--launch-prefix", type=str,
                         default="torchrun --standalone --nproc_per_node=8",
@@ -111,7 +113,9 @@ def main():
                         help="Wandb group to organize all runs together")
 
     # Pass-through flags for unlimited/train.py
-    parser.add_argument("--mup-base-width", type=int, default=256)
+    parser.add_argument("--mup-base-width", type=int, default=768)
+    parser.add_argument("--mup-base-depth", type=int, default=12)
+    parser.add_argument("--mup-base-head-dim", type=int, default=64)
     parser.add_argument("--weight-decay", type=float, default=1.3)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--ensemble-mode", type=str, default="logit",
@@ -151,7 +155,8 @@ def main():
     print(f"  Model sizes: {len(model_sizes)}")
     for n_layer, n_head, n_embd in model_sizes:
         print(f"    d{n_layer} (n_layer={n_layer}, n_head={n_head}, n_embd={n_embd})"
-              f"  depth_scale={1.0/n_layer:.4f}, output_mult={args.mup_base_width/n_embd:.4f}")
+              f"  depth_scale={args.mup_base_depth/n_layer:.4f}, "
+              f"output_mult={args.mup_base_width/n_embd:.4f}")
     print(f"  Optimizer: {args.optimizer}, CompleteP: True")
     print(f"  Ensemble strategies: {len(ensemble_strategies)}, members: {args.num_models}")
     print(f"  Epochs: {args.num_epochs}")

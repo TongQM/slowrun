@@ -86,7 +86,7 @@ def main():
         train_config = json.load(f)
 
     # Inject the loaded config into argv so train.py's argparse picks up matching values
-    # (we actually only need n_layer/n_head/n_embd/dropout/completep/mup_base_width)
+    # (we actually only need architecture/dropout plus CompleteP base scales)
     m_cfg = train_config["model"]
     val_cfg = train_config.get("val", {})
     sys.argv = [sys.argv[0],
@@ -94,7 +94,9 @@ def main():
                 f"--n_head={m_cfg['n_head']}",
                 f"--n_embd={m_cfg['n_embd']}",
                 f"--dropout={m_cfg['dropout']}",
-                f"--mup-base-width={m_cfg['mup_base_width']}",
+                f"--mup-base-width={m_cfg.get('mup_base_width', 768)}",
+                f"--mup-base-depth={m_cfg.get('mup_base_depth', 12)}",
+                f"--mup-base-head-dim={m_cfg.get('mup_base_head_dim', 64)}",
                 f"--device-batch-size={args.device_batch_size}",
                 "--compile-mode=eager"]
     if m_cfg.get("completep"):
@@ -135,7 +137,9 @@ def main():
         n_embd=m_cfg["n_embd"],
         dropout=m_cfg["dropout"],
         completep=m_cfg.get("completep", False),
-        mup_base_width=m_cfg.get("mup_base_width", 256),
+        mup_base_width=m_cfg.get("mup_base_width", 768),
+        mup_base_depth=m_cfg.get("mup_base_depth", 12),
+        mup_base_head_dim=m_cfg.get("mup_base_head_dim", 64),
         optimizer=train_config["optimizer"]["name"],
     )
 
