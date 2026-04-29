@@ -338,16 +338,20 @@ class CausalSelfAttention(nn.Module):
         self.attn_gate_channels = 12
         self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
         # CompleteP forward multipliers (1.0/default attention scale when completep off).
-        # Per spec: Q/K/V have NO forward multiplier — width adjustment is in init only.
-        # Only c_proj output gets the d_base/d multiplier.
+        # Off-spec extension: we apply d_base/d to Q/K/V too (advisor's spec leaves them
+        # at 1.0). Multiplier on Q,K is canceled by the subsequent RMSNorm so it has no
+        # effect on attention scores; multiplier on V combined with V's width-aware init
+        # gives Var(V) ∝ d_base, width-invariant — making per-block residual contribution
+        # width-invariant downstream of c_proj as well.
+        self.qkv_mult = 1.0
         self.out_mult = 1.0
         self.softmax_scale = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
-        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
-        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+        q = (self.qkv_mult * self.c_q(x)).view(B, T, self.n_head, self.head_dim)
+        k = (self.qkv_mult * self.c_k(x)).view(B, T, self.n_kv_head, self.head_dim)
+        v = (self.qkv_mult * self.c_v(x)).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
             ve = ve.view(B, T, self.n_kv_head, self.head_dim)
             gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
@@ -415,14 +419,15 @@ class GPT(nn.Module):
         self.output_multiplier = config.mup_base_width / config.n_embd if config.completep else 1.0
         self.ve_multiplier = self.output_multiplier
 
-        # CompleteP per-weight forward multipliers (per advisor's spec):
+        # CompleteP per-weight forward multipliers. Spec applies d_base/d to output
+        # projections only; we extend it to Q/K/V (harmless on Q,K because of the
+        # subsequent RMSNorm; tightens variance balance on V) and ve_projs (already via
+        # ve_multiplier above):
+        #   Attention Q, K, V:         d_base / d  (off-spec; RMSNorm-canceled on Q,K)
         #   Attention w_out (c_proj):  d_base / d
         #   Attention softmax scale:   sqrt(d_head_base) / d_head
         #   FFN w1, w3 (c_gate, c_fc): d_base / d         (fan-in = d)
         #   FFN w2 (c_proj):           hidden_base / hidden  (fan-in = hidden)
-        # Q/K/V intentionally have NO forward multiplier — they only carry the
-        # width-aware init. Combined with the init scaling, effective output
-        # variance is width-independent at every layer.
         if config.completep:
             d_base = config.mup_base_width
             d = config.n_embd
@@ -430,6 +435,7 @@ class GPT(nn.Module):
             out_mult = d_base / d
             softmax_scale = (config.mup_base_head_dim ** 0.5) / (config.n_embd // config.n_head)
             for block in self.transformer.h:
+                block.attn.qkv_mult = out_mult
                 block.attn.out_mult = out_mult
                 block.attn.softmax_scale = softmax_scale
                 block.mlp.w1_mult = out_mult

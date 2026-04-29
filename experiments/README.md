@@ -49,9 +49,9 @@ Both modes use cross-epoch shuffling (data order changes per epoch). The differe
 - `init_shuffle` → **π_{i,k}** (independent schedules): each model uses `data_seed=42+i` so every (model, epoch) pair has its own unique permutation. Init AND data order diverge across models.
 
 ### CompleteP (`--completep`)
-Matches the spec from advisor — width-aware init combined with output-projection forward multipliers, designed so `Var(output)` is width-independent (single LR transfers).
+Width-aware init + per-output-projection forward multipliers. Spec from advisor with one off-spec extension: Q/K/V also get the `d_base/d` forward multiplier (no-op on Q,K under RMSNorm; tightens V-side variance balance to `Var(V) ∝ d_base`).
 - **Init** (truncated normal, ±3σ, `init_std = 0.02`): embedding and LM head use constant `init_std` (no width scaling). Q/K/V, attn `c_proj`, FFN `c_gate`/`c_fc`, and `ve_projs` use `init_std × sqrt(d / mup_base_width)` (fan-in = `d`). FFN `c_proj` uses `init_std × sqrt(hidden / hidden_base)` (fan-in = `hidden`). At `d == mup_base_width` every `sqrt` factor is 1.
-- **Forward multipliers**: attn `c_proj × d_base/d`; FFN `c_gate, c_fc × d_base/d`; FFN `c_proj × hidden_base/hidden`. **Q/K/V have no forward multiplier** — only the init scaling. LM head logits × `d_base/d`.
+- **Forward multipliers**: every dense matrix except the readout-style embedding/LM-head layers gets `d_base/d` (or `hidden_base/hidden` for FFN `c_proj`). Specifically: attn Q/K/V (off-spec) and `c_proj`; FFN `c_gate, c_fc, c_proj`; `ve_projs` (`ve_multiplier`); LM head logits.
 - **Depth scaling**: each Block's attn and MLP outputs are multiplied by `mup_base_depth / n_layer` before the residual add. Default base depth 12.
 - **Attention scale**: `sqrt(mup_base_head_dim) / head_dim` instead of `1 / sqrt(head_dim)`. At constant head_dim (our setup) this collapses to the default.
 - **No matrix-LR rescaling**: width handling lives entirely in init + forward multipliers; AdamW matrix LR is width-invariant. Train all widths with the same LR.

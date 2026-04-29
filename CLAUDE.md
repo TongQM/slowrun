@@ -139,15 +139,16 @@ Our `--completep` matches the spec given by our advisor — width-aware init com
   - FFN `c_proj` (fan-in = `hidden`): `init_std × sqrt(hidden / hidden_base)`.
   - LM head: constant `init_std` (no width scaling).
   - At `d = d_base` every `sqrt` factor is 1 → all weights init at `init_std`.
-- **Forward multipliers**:
+- **Forward multipliers** (every dense layer except the embedding/LM-head readout-style layers gets a `d_base/d` factor; spec leaves Q/K/V at 1.0, our extension applies it there too):
+  - Attn Q, K, V outputs × `d_base / d` (off-spec extension; on Q,K it's a no-op because of the subsequent RMSNorm; on V it tightens the variance balance — `Var(V) ∝ d_base`).
   - Attn `c_proj` output × `d_base / d`.
   - Attn softmax scale: `sqrt(d_head_base) / d_head` (collapses to standard `1/sqrt(d_head)` at constant head_dim).
   - FFN `c_gate`, `c_fc` outputs × `d_base / d`.
   - FFN `c_proj` output × `hidden_base / hidden`.
+  - `ve_projs` output × `d_base / d` (`ve_multiplier`).
   - LM head logit × `d_base / d` (equivalent to multiplying input `h` by `d_base / d`).
   - Residual branch × `L_base / L` (default `12 / L`).
-  - **Q, K, V have no forward multiplier** — width adjustment is in the init only.
-- **Single LR across widths** — `init × √(d/d_base)` and forward × `d_base/d` cancel: `Var(output) ∝ init_std² × (d/d_base) × (d_base/d)² × d = init_std² × d_base`, width-independent.
+- **Single LR across widths** — width handling lives entirely in init + forward multipliers; the AdamW matrix LR is width-invariant.
 
 ## Data Efficiency Metric
 
