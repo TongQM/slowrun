@@ -319,6 +319,56 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos], 3)
 
 
+class BodyLinear(nn.Linear):
+    """
+    nn.Linear with CompleteP forward multiplier and width-aware init.
+
+    Every dense matmul in the model — Q/K/V, attn c_proj, MLP c_gate/c_fc/c_proj,
+    ve_projs, and lm_head — uses this class. Embedding (wte) is the only excluded
+    layer (it's an nn.Embedding lookup, not a matmul).
+
+    Forward:
+        output = (fan_in_base / in_features) × (W·x + b)
+
+    Init (call init_weight() explicitly; nn.Linear's default kaiming init is overridden):
+        - init_mode="width_aware":
+            std = init_std × sqrt(in_features / fan_in_base)
+        - init_mode="constant":
+            std = init_std       (used by readout-style layers like lm_head, where
+                                  the spec wants no width scaling on init)
+
+    At in_features == fan_in_base both factors collapse to 1, so the layer behaves
+    exactly like nn.Linear with N(0, init_std²) trunc-normal init.
+
+    For non-CompleteP runs, pass fan_in_base=None — the forward multiplier becomes 1.
+    Vanilla weight init is then applied in GPT.init_weights() directly (overriding
+    BodyLinear's default).
+    """
+
+    def __init__(self, in_features, out_features, *, fan_in_base=None,
+                 init_std=0.02, init_mode="width_aware", bias=False):
+        super().__init__(in_features, out_features, bias=bias)
+        self.fan_in_base = fan_in_base if fan_in_base is not None else in_features
+        self.init_std = init_std
+        self.init_mode = init_mode
+        self.fwd_mult = self.fan_in_base / in_features
+
+    def forward(self, x):
+        return self.fwd_mult * super().forward(x)
+
+    @torch.no_grad()
+    def init_weight(self):
+        if self.init_mode == "width_aware":
+            std = self.init_std * (self.in_features / self.fan_in_base) ** 0.5
+        elif self.init_mode == "constant":
+            std = self.init_std
+        else:
+            raise ValueError(f"unknown init_mode {self.init_mode!r}")
+        torch.nn.init.trunc_normal_(self.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -327,64 +377,56 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        fib = config.mup_base_width if config.completep else None
+        self.c_q = BodyLinear(self.n_embd, self.n_head * self.head_dim, fan_in_base=fib)
+        self.c_k = BodyLinear(self.n_embd, self.n_kv_head * self.head_dim, fan_in_base=fib)
+        self.c_v = BodyLinear(self.n_embd, self.n_kv_head * self.head_dim, fan_in_base=fib)
+        self.c_proj = BodyLinear(self.n_embd, self.n_embd, fan_in_base=fib)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.ve_gate_channels = 32
-        self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
-        # Attention gate: per-head gating to enable context-based no-op
-        self.attn_gate_channels = 12
-        self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
-        # CompleteP forward multipliers (1.0/default attention scale when completep off).
-        # Off-spec extension: we apply d_base/d to Q/K/V too (advisor's spec leaves them
-        # at 1.0). Multiplier on Q,K is canceled by the subsequent RMSNorm so it has no
-        # effect on attention scores; multiplier on V combined with V's width-aware init
-        # gives Var(V) ∝ d_base, width-invariant — making per-block residual contribution
-        # width-invariant downstream of c_proj as well.
-        self.qkv_mult = 1.0
-        self.out_mult = 1.0
-        self.softmax_scale = None
+        # Softmax scale: under CompleteP we override 1/sqrt(d_head) with
+        # sqrt(d_head_base)/d_head (collapses to standard at constant head_dim).
+        if config.completep:
+            self.softmax_scale = (config.mup_base_head_dim ** 0.5) / self.head_dim
+        else:
+            self.softmax_scale = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
-        q = (self.qkv_mult * self.c_q(x)).view(B, T, self.n_head, self.head_dim)
-        k = (self.qkv_mult * self.c_k(x)).view(B, T, self.n_kv_head, self.head_dim)
-        v = (self.qkv_mult * self.c_v(x)).view(B, T, self.n_kv_head, self.head_dim)
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
         if ve is not None:
-            ve = ve.view(B, T, self.n_kv_head, self.head_dim)
-            gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
-            v = v + gate.unsqueeze(-1) * ve
+            v = v + ve.view(B, T, self.n_kv_head, self.head_dim)
         cos, sin = cos_sin
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size,
                                        softmax_scale=self.softmax_scale)
-        # Attention gate: per-head sigmoid gate
-        y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate_channels])).unsqueeze(-1)
         y = y.contiguous().view(B, T, -1)
-        return self.resid_dropout(self.out_mult * self.c_proj(y))
+        return self.resid_dropout(self.c_proj(y))
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.hidden = 256 * ((8 * config.n_embd // 3 + 255) // 256)
-        self.c_gate = nn.Linear(config.n_embd, self.hidden, bias=False)
-        self.c_fc = nn.Linear(config.n_embd, self.hidden, bias=False)
-        self.c_proj = nn.Linear(self.hidden, config.n_embd, bias=False)
+        if config.completep:
+            d_base = config.mup_base_width
+            h_base = 256 * ((8 * d_base // 3 + 255) // 256)
+            d_fib = d_base
+        else:
+            h_base = None
+            d_fib = None
+        # c_gate, c_fc: fan-in = d_model. c_proj: fan-in = hidden.
+        self.c_gate = BodyLinear(config.n_embd, self.hidden, fan_in_base=d_fib)
+        self.c_fc = BodyLinear(config.n_embd, self.hidden, fan_in_base=d_fib)
+        self.c_proj = BodyLinear(self.hidden, config.n_embd, fan_in_base=h_base)
         self.resid_dropout = nn.Dropout(config.dropout)
-        # CompleteP per-weight output multipliers (set to non-1 in GPT.__init__ when completep on)
-        # w1 = c_gate, w3 = c_fc (both fan-in = d_model); w2 = c_proj (fan-in = hidden_size)
-        self.w1_mult = 1.0
-        self.w3_mult = 1.0
-        self.w2_mult = 1.0
 
     def forward(self, x):
-        gate = self.w1_mult * self.c_gate(x)
-        up = self.w3_mult * self.c_fc(x)
-        out = self.w2_mult * self.c_proj(F.silu(gate) * up)
+        gate = self.c_gate(x)
+        up = self.c_fc(x)
+        out = self.c_proj(F.silu(gate) * up)
         return self.resid_dropout(out)
 
 
@@ -415,37 +457,21 @@ class GPT(nn.Module):
             "wte": nn.Embedding(padded_vocab, config.n_embd),
             "h": nn.ModuleList([Block(config, i, depth_scale=depth_scale) for i in range(config.n_layer)]),
         })
-        self.lm_head = nn.Linear(config.n_embd, padded_vocab, bias=False)
-        self.output_multiplier = config.mup_base_width / config.n_embd if config.completep else 1.0
-        self.ve_multiplier = self.output_multiplier
-
-        # CompleteP per-weight forward multipliers. Spec applies d_base/d to output
-        # projections only; we extend it to Q/K/V (harmless on Q,K because of the
-        # subsequent RMSNorm; tightens variance balance on V) and ve_projs (already via
-        # ve_multiplier above):
-        #   Attention Q, K, V:         d_base / d  (off-spec; RMSNorm-canceled on Q,K)
-        #   Attention w_out (c_proj):  d_base / d
-        #   Attention softmax scale:   sqrt(d_head_base) / d_head
-        #   FFN w1, w3 (c_gate, c_fc): d_base / d         (fan-in = d)
-        #   FFN w2 (c_proj):           hidden_base / hidden  (fan-in = hidden)
-        if config.completep:
-            d_base = config.mup_base_width
-            d = config.n_embd
-            h_base = 256 * ((8 * d_base // 3 + 255) // 256)
-            out_mult = d_base / d
-            softmax_scale = (config.mup_base_head_dim ** 0.5) / (config.n_embd // config.n_head)
-            for block in self.transformer.h:
-                block.attn.qkv_mult = out_mult
-                block.attn.out_mult = out_mult
-                block.attn.softmax_scale = softmax_scale
-                block.mlp.w1_mult = out_mult
-                block.mlp.w3_mult = out_mult
-                block.mlp.w2_mult = h_base / block.mlp.hidden
+        # All "body" matrices use BodyLinear, which encapsulates the CompleteP
+        # forward multiplier (d_base/d) and the width-aware init. The lm_head
+        # uses init_mode="constant" — the spec's readout convention (constant
+        # init, but still apply the d_base/d forward multiplier).
+        fib = config.mup_base_width if config.completep else None
+        self.lm_head = BodyLinear(config.n_embd, padded_vocab, fan_in_base=fib,
+                                  init_mode="constant")
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.ve_projs = nn.ModuleDict({str(i): nn.Linear(config.n_embd, kv_dim, bias=False) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
+        self.ve_projs = nn.ModuleDict({
+            str(i): BodyLinear(config.n_embd, kv_dim, fan_in_base=fib)
+            for i in range(config.n_layer) if has_ve(i, config.n_layer)
+        })
         # U-Net skip connections: encoder layer i → decoder layer (n_layer - 1 - i)
         self.encoder_layers = config.n_layer // 2
         self.skip_weights = nn.Parameter(torch.ones(self.encoder_layers))
@@ -465,34 +491,19 @@ class GPT(nn.Module):
     def init_weights(self, convert_embed=True):
         d = self.config.n_embd
         if self.config.completep:
-            # CompleteP init per advisor's spec.
-            # Embedding & LM head: constant init_std (no width scaling).
-            # Hidden matrices with fan-in = d: std = init_std × sqrt(d / d_base).
-            # FFN w2 (fan-in = hidden):       std = init_std × sqrt(hidden / hidden_base).
-            # At d = d_base every sqrt factor is 1 → all weights init at init_std.
+            # All BodyLinears self-init via their init_weight() method (width-aware
+            # for hidden body matrices, constant for lm_head). Embedding (wte) is the
+            # only non-BodyLinear weight to set explicitly.
             init_std = 0.02
-            d_base = self.config.mup_base_width
-            h_base = 256 * ((8 * d_base // 3 + 255) // 256)
-
-            def trunc_normal_(weight, std):
-                torch.nn.init.trunc_normal_(weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
-
-            std_d = init_std * ((d / d_base) ** 0.5)
-            trunc_normal_(self.transformer.wte.weight, init_std)
-            trunc_normal_(self.lm_head.weight, init_std)
-            for block in self.transformer.h:
-                trunc_normal_(block.attn.c_q.weight, std_d)
-                trunc_normal_(block.attn.c_k.weight, std_d)
-                trunc_normal_(block.attn.c_v.weight, std_d)
-                trunc_normal_(block.attn.c_proj.weight, std_d)
-                trunc_normal_(block.mlp.c_gate.weight, std_d)
-                trunc_normal_(block.mlp.c_fc.weight, std_d)
-                std_h = init_std * ((block.mlp.hidden / h_base) ** 0.5)
-                trunc_normal_(block.mlp.c_proj.weight, std_h)
-            for proj in self.ve_projs.values():
-                trunc_normal_(proj.weight, std_d)
+            torch.nn.init.trunc_normal_(self.transformer.wte.weight,
+                                        mean=0.0, std=init_std,
+                                        a=-3 * init_std, b=3 * init_std)
+            for module in self.modules():
+                if isinstance(module, BodyLinear):
+                    module.init_weight()
         else:
-            # Historical slowrun init
+            # Historical slowrun init (overrides BodyLinear's default — fwd_mult is
+            # already 1 in non-completep mode since we passed fan_in_base=None).
             torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
             torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
             s = 3**0.5 * d**-0.5
@@ -509,10 +520,6 @@ class GPT(nn.Module):
 
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
-        for block in self.transformer.h:
-            if block.attn.ve_gate is not None:
-                torch.nn.init.zeros_(block.attn.ve_gate.weight)
-            torch.nn.init.zeros_(block.attn.attn_gate.weight)
         self.skip_weights.fill_(1.0)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
@@ -605,7 +612,7 @@ class GPT(nn.Module):
             if 0 <= j < self.encoder_layers:
                 x = x + self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.ve_multiplier * self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
+            ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
         return x
 
@@ -619,7 +626,7 @@ class GPT(nn.Module):
         encoder_outputs = []
         for i in range(self.encoder_layers):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.ve_multiplier * self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
+            ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
             encoder_outputs.append(x)
 
@@ -649,8 +656,8 @@ class GPT(nn.Module):
                                         dupe[1], self.config.n_layer)
 
         x = norm(x)
+        # lm_head is a BodyLinear, so the d_base/d output multiplier is applied inside it.
         logits = self.lm_head(x)[..., :self.config.vocab_size].float()
-        logits = logits * self.output_multiplier
         logits = 15 * torch.tanh(logits / 15)
         if targets is not None:
             if loss_reduction == 'none':
