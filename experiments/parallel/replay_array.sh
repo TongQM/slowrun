@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=replay_ensemble
 #SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
+#SBATCH --account=cis260161p
 #SBATCH --gpus=h100-80:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -29,10 +29,10 @@ fi
 module load anaconda3/2024.10-1
 conda activate slowrun
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+cd /ocean/projects/cis260161p/ymiao6/scaling/slowrun
 
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+if [ -f /ocean/projects/cis260161p/ymiao6/.wandb_key ]; then
+    export WANDB_API_KEY=$(cat /ocean/projects/cis260161p/ymiao6/.wandb_key)
 fi
 mkdir -p experiments/logs
 
@@ -42,16 +42,16 @@ export PYTHONUNBUFFERED=1
 # --- Configuration (overridable via env vars from experiments/parallel/launch.sh) ---
 N_LAYER="${N_LAYER:-12}"
 N_EMBD="${N_EMBD:-768}"
-NUM_EPOCHS="${NUM_EPOCHS:-20}"
+NUM_EPOCHS="${NUM_EPOCHS:-25}"
 END_EPOCH="${END_EPOCH:-$NUM_EPOCHS}"   # cap replay at this epoch (for partial training runs)
 SKIP_INDIV_VAL="${SKIP_INDIV_VAL:-1}"   # 1 = don't re-evaluate per-model val (training already logs it); 0 = do eval
 DATA_FRACTION="${DATA_FRACTION:-0.2}"
 ENSEMBLE_MODE="${ENSEMBLE_MODE:-logit}"
-WANDB_GROUP="parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}"
+WANDB_GROUP="${WANDB_GROUP:-parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}}"
 
 # Ensemble sizes to sweep over (size=1 omitted; covered by per-model val during training)
 # Override via ENS_SIZES_STR env var (space-separated), e.g. ENS_SIZES_STR="2 3 4 5"
-ENS_SIZES_STR="${ENS_SIZES_STR:-2 4 8 16 20}"
+ENS_SIZES_STR="${ENS_SIZES_STR:-2 4 5}"
 read -ra ENS_SIZES <<< "$ENS_SIZES_STR"
 NUM_SIZES=${#ENS_SIZES[@]}
 
@@ -67,7 +67,7 @@ case $STRATEGY_IDX in
 esac
 
 RUN_ID="parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
-CKPT_DIR="checkpoints/${RUN_ID}"
+CKPT_DIR="${CHECKPOINT_BASE:-checkpoints}/${RUN_ID}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_ens${ENS_SIZE}_replay"
 PROGRESS_FILE="${CKPT_DIR}/replay_progress_${STRATEGY_NAME}_ens${ENS_SIZE}.json"
 

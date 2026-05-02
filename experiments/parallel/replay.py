@@ -140,6 +140,7 @@ def main():
         mup_base_width=m_cfg.get("mup_base_width", 768),
         mup_base_depth=m_cfg.get("mup_base_depth", 12),
         mup_base_head_dim=m_cfg.get("mup_base_head_dim", 64),
+        no_ve_projs=m_cfg.get("no_ve_projs", False),
         optimizer=train_config["optimizer"]["name"],
     )
 
@@ -150,8 +151,10 @@ def main():
     indiv_eval_steps = EVAL_TOKENS // (indiv_eval_B * MAX_SEQ_LEN * 1)
     evaluate_bpb = train_mod.evaluate_bpb
 
-    # Steps-per-epoch for x-axis (so per-model val maps to step count)
+    # Steps-per-epoch for legacy x-axis; tokens_per_epoch for the canonical x-axis.
     steps_per_epoch = train_config["training"].get("steps_per_epoch", 1)
+    tokens_per_epoch = train_config["training"].get("tokens_per_epoch",
+                                                    steps_per_epoch * train_config["training"].get("total_batch_size", 0))
 
     # Init wandb (optionally resume an existing run)
     wandb_kwargs = {"project": args.wandb_project, "name": args.wandb_run_name,
@@ -172,25 +175,94 @@ def main():
         print(f"[resume] Restarting after epoch {resumed_from}; "
               f"replaying epochs {args.start_epoch}..{args.end_epoch}")
 
-    # Define metric step axes (clean per-model curves in wandb)
+    # Define metric step axes (clean per-model curves in wandb).
+    # Canonical x-axis = cumulative tokens-seen (with repeats across epochs);
+    # for ensemble metrics, this is per-model tokens at the synced epoch boundary.
     for i in range(args.num_models):
-        run.define_metric(f"model_{i+1}/step")
-        run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/step")
-    run.define_metric("ens/epoch")
-    run.define_metric("ens/*", step_metric="ens/epoch")
+        run.define_metric(f"model_{i+1}/tokens_seen")
+        run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/tokens_seen")
+    run.define_metric("ens/tokens_seen")
+    run.define_metric("ens/*", step_metric="ens/tokens_seen")
 
-    # Process each epoch (with optional resume range)
-    print(f"Replay epochs {args.start_epoch}..{args.end_epoch}")
-    for epoch in range(args.start_epoch, args.end_epoch + 1):
-        ckpt_paths = [os.path.join(args.checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
-                      for i in range(args.num_models)]
-        missing = [p for p in ckpt_paths if not os.path.exists(p)]
-        if missing:
-            print(f"[epoch {epoch}] SKIP — missing checkpoints: {missing}")
-            continue
+    # ---- Discover all checkpoint evaluation points across all models ----
+    # Each event is (tokens_seen, kind, identifier, [ckpt_path_per_model]).
+    #   kind="epoch" identifier=k     ckpt = model_{i}_epoch_{k}.pt   tokens = k*tokens_per_epoch
+    #   kind="step"  identifier=S     ckpt = model_{i}_step_{S}.pt    tokens = S*total_batch_size
+    # We only emit an event when ALL `num_models` models have a checkpoint at that point.
+    total_batch_size = train_config["training"].get("total_batch_size", tokens_per_epoch // max(1, steps_per_epoch))
+
+    def _discover_events():
+        epoch_avail = {k: 0 for k in range(1, args.num_epochs + 1)}
+        step_avail  = {}  # S -> count
+        for fn in os.listdir(args.checkpoint_dir):
+            if not fn.endswith(".pt"):
+                continue
+            for i in range(args.num_models):
+                pre = f"model_{i}_epoch_"
+                if fn.startswith(pre):
+                    try:
+                        k = int(fn[len(pre):-len(".pt")])
+                    except ValueError:
+                        continue
+                    if 1 <= k <= args.num_epochs:
+                        epoch_avail[k] = epoch_avail.get(k, 0) + 1
+                    break
+                pre = f"model_{i}_step_"
+                if fn.startswith(pre):
+                    try:
+                        S = int(fn[len(pre):-len(".pt")])
+                    except ValueError:
+                        continue
+                    step_avail[S] = step_avail.get(S, 0) + 1
+                    break
+        events = []
+        for k, n in epoch_avail.items():
+            if n >= args.num_models:
+                events.append((k * tokens_per_epoch, "epoch", k))
+        for S, n in step_avail.items():
+            if n >= args.num_models:
+                events.append((S * total_batch_size, "step", S))
+        events.sort()
+        return events
+
+    events = _discover_events()
+    print(f"Found {len(events)} checkpoint evaluation points "
+          f"({sum(1 for e in events if e[1]=='epoch')} epoch + "
+          f"{sum(1 for e in events if e[1]=='step')} step)")
+
+    # Filter by start/end epoch range (interpreted as cumulative tokens)
+    start_tokens = (args.start_epoch - 1) * tokens_per_epoch  # exclusive
+    end_tokens   = args.end_epoch * tokens_per_epoch          # inclusive
+    events = [e for e in events if start_tokens < e[0] <= end_tokens]
+    print(f"Replay {len(events)} events in range "
+          f"({start_tokens:,} < tokens_seen <= {end_tokens:,})")
+
+    # Resume: skip events whose tokens_seen is <= last_completed
+    resume_tokens = 0
+    if args.progress_file and os.path.exists(args.progress_file):
+        with open(args.progress_file) as f:
+            prog = json.load(f)
+        resume_tokens = int(prog.get("last_completed_tokens",
+                                     prog.get("last_completed_epoch", 0) * tokens_per_epoch))
+    if resume_tokens > 0:
+        before = len(events)
+        events = [e for e in events if e[0] > resume_tokens]
+        print(f"[resume] last_completed_tokens={resume_tokens:,}; "
+              f"skipping {before - len(events)} already-done events")
+
+    # ---- Process each evaluation event ----
+    for tokens_seen, kind, ident in events:
+        if kind == "epoch":
+            ckpt_paths = [os.path.join(args.checkpoint_dir, f"model_{i}_epoch_{ident}.pt")
+                          for i in range(args.num_models)]
+            label = f"epoch={ident} tokens={tokens_seen:,}"
+        else:  # step
+            ckpt_paths = [os.path.join(args.checkpoint_dir, f"model_{i}_step_{ident}.pt")
+                          for i in range(args.num_models)]
+            label = f"step={ident} tokens={tokens_seen:,}"
 
         t0 = time.time()
-        print(f"[epoch {epoch}] Loading {args.num_models} models...")
+        print(f"[{label}] Loading {args.num_models} models...")
         models = []
         for ckpt_path in ckpt_paths:
             with torch.device("meta"):
@@ -210,13 +282,18 @@ def main():
                                           device=device, seed=0, quiet=True)
                 with autocast_ctx:
                     vbpb, vloss = evaluate_bpb(m, indiv_loader, indiv_eval_steps, token_bytes)
-                print(f"  [model {i+1}] epoch {epoch}: val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
-                run.log({
+                print(f"  [model {i+1}] {label}: val_loss={vloss:.4f} val_bpb={vbpb:.4f}")
+                _log = {
                     f"model_{i+1}/val_loss": vloss,
                     f"model_{i+1}/val_bpb": vbpb,
-                    f"model_{i+1}/epoch": epoch,
-                    f"model_{i+1}/step": epoch * steps_per_epoch,
-                }, commit=True)
+                    f"model_{i+1}/tokens_seen": tokens_seen,
+                }
+                if kind == "epoch":
+                    _log[f"model_{i+1}/epoch"] = ident
+                    _log[f"model_{i+1}/step"] = ident * steps_per_epoch
+                else:
+                    _log[f"model_{i+1}/step"] = ident
+                run.log(_log, commit=True)
 
         # Ensemble val eval
         val_loader = DataLoader(val_path, ens_eval_B, MAX_SEQ_LEN,
@@ -226,20 +303,28 @@ def main():
             device, autocast_ctx, mode=args.ensemble_mode)
 
         dt = time.time() - t0
-        print(f"[epoch {epoch}] ens_val_loss={eloss:.6f} ens_val_bpb={ebpb:.6f}  ({dt:.1f}s total)")
+        print(f"[{label}] ens_val_loss={eloss:.6f} ens_val_bpb={ebpb:.6f}  ({dt:.1f}s total)")
 
-        run.log({
+        _ens_log = {
             "ens/val_loss": eloss,
             "ens/val_bpb": ebpb,
             "ens/num_models": args.num_models,
-            "ens/epoch": epoch,
-        }, commit=True)
+            "ens/tokens_seen": tokens_seen,
+        }
+        if kind == "epoch":
+            _ens_log["ens/epoch"] = ident
+        run.log(_ens_log, commit=True)
 
         # Persist progress atomically (rename is atomic on POSIX)
         if args.progress_file:
             tmp = args.progress_file + ".tmp"
             with open(tmp, "w") as f:
-                json.dump({"last_completed_epoch": epoch, "wandb_run_id": run.id}, f)
+                json.dump({
+                    "last_completed_tokens": tokens_seen,
+                    "last_completed_kind":   kind,
+                    "last_completed_id":     ident,
+                    "wandb_run_id": run.id,
+                }, f)
             os.replace(tmp, args.progress_file)
 
         del models

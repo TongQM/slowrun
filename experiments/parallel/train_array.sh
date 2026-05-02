@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=parallel_baseline
 #SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
+#SBATCH --account=cis260161p
 #SBATCH --gpus=h100-80:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -33,10 +33,10 @@ fi
 module load anaconda3/2024.10-1
 conda activate slowrun
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+cd /ocean/projects/cis260161p/ymiao6/scaling/slowrun
 
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+if [ -f /ocean/projects/cis260161p/ymiao6/.wandb_key ]; then
+    export WANDB_API_KEY=$(cat /ocean/projects/cis260161p/ymiao6/.wandb_key)
 fi
 mkdir -p experiments/logs
 
@@ -44,17 +44,43 @@ mkdir -p experiments/logs
 N_LAYER="${N_LAYER:-12}"
 N_HEAD="${N_HEAD:-12}"
 N_EMBD="${N_EMBD:-768}"
-NUM_MODELS="${NUM_MODELS:-20}"
-NUM_EPOCHS="${NUM_EPOCHS:-20}"
+NUM_MODELS="${NUM_MODELS:-5}"
+NUM_EPOCHS="${NUM_EPOCHS:-25}"
 DATA_FRACTION="${DATA_FRACTION:-0.2}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
 ENSEMBLE_MODE="${ENSEMBLE_MODE:-logit}"
-TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"   # tokens per optimizer step
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-131072}"   # tokens per optimizer step
 # --compile-mode: inductor is fastest but requires H100; eager works on all GPUs
-COMPILE_MODE="${COMPILE_MODE:-eager}"
+COMPILE_MODE="${COMPILE_MODE:-inductor}"
 # --val-every-n-steps: 0 = only at epoch boundary (fast). >0 gives denser val curves but much slower.
 VAL_EVERY_N_STEPS="${VAL_EVERY_N_STEPS:-0}"
-WANDB_GROUP="parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}"
+# CompleteP defaults: ALWAYS on for this project. NO_VE_PROJS=1 → adds --no-ve-projs.
+COMPLETEP="${COMPLETEP:-1}"
+NO_VE_PROJS="${NO_VE_PROJS:-1}"
+MUP_BASE_WIDTH="${MUP_BASE_WIDTH:-768}"
+MUP_BASE_DEPTH="${MUP_BASE_DEPTH:-12}"
+MUP_BASE_HEAD_DIM="${MUP_BASE_HEAD_DIM:-64}"
+WANDB_GROUP="${WANDB_GROUP:-parallel_d${N_LAYER}_w${N_EMBD}_df${DATA_FRACTION}_${SHARED_TIMESTAMP}}"
+
+EXTRA_FLAGS=()
+if [ "$COMPLETEP" = "1" ]; then
+    EXTRA_FLAGS+=(--completep
+                  --mup-base-width=$MUP_BASE_WIDTH
+                  --mup-base-depth=$MUP_BASE_DEPTH
+                  --mup-base-head-dim=$MUP_BASE_HEAD_DIM)
+fi
+if [ "$NO_VE_PROJS" = "1" ]; then
+    EXTRA_FLAGS+=(--no-ve-projs)
+fi
+if [ "${NO_WARMDOWN:-0}" = "1" ]; then
+    EXTRA_FLAGS+=(--no-warmdown)
+fi
+if [ "${CHECKPOINT_EVERY_N_STEPS:-0}" -gt 0 ] 2>/dev/null; then
+    EXTRA_FLAGS+=(--checkpoint-every-n-steps=$CHECKPOINT_EVERY_N_STEPS)
+fi
+if [ -n "${CHECKPOINT_BASE:-}" ]; then
+    EXTRA_FLAGS+=(--checkpoint-base="$CHECKPOINT_BASE")
+fi
 
 # --- Map array index to (strategy, model_idx) ---
 STRATEGY_IDX=$((SLURM_ARRAY_TASK_ID / NUM_MODELS))
@@ -76,7 +102,8 @@ esac
 
 RUN_ID="parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
 RUN_NAME="${WANDB_GROUP}_${STRATEGY_NAME}_model${MODEL_IDX}"
-FINAL_CKPT="checkpoints/${RUN_ID}/model_${MODEL_IDX}_epoch_${NUM_EPOCHS}.pt"
+_CKPT_BASE="${CHECKPOINT_BASE:-checkpoints}"
+FINAL_CKPT="${_CKPT_BASE}/${RUN_ID}/model_${MODEL_IDX}_epoch_${NUM_EPOCHS}.pt"
 
 echo "============================================================"
 echo "Parallel job (array $SLURM_ARRAY_TASK_ID)"
@@ -110,6 +137,7 @@ torchrun \
     --total-batch-size=$TOTAL_BATCH_SIZE \
     --num-epochs-model-0=$NUM_EPOCHS \
     --compile-mode=$COMPILE_MODE \
+    "${EXTRA_FLAGS[@]}" \
     --resume=$RUN_ID \
     --run=$RUN_NAME \
     --wandb_group=$WANDB_GROUP

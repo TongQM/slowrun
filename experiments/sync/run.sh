@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=completep_baseline
 #SBATCH --partition=GPU-shared
-#SBATCH --account=cis260095p
+#SBATCH --account=cis260161p
 #SBATCH --gpus=h100-80:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -25,11 +25,11 @@ set -euo pipefail
 module load anaconda3/2024.10-1
 conda activate slowrun
 
-cd /ocean/projects/cis260095p/ymiao6/scaling/slowrun
+cd /ocean/projects/cis260161p/ymiao6/scaling/slowrun
 
-# wandb API key (create this file with: echo "YOUR_KEY" > /ocean/projects/cis260095p/ymiao6/.wandb_key)
-if [ -f /ocean/projects/cis260095p/ymiao6/.wandb_key ]; then
-    export WANDB_API_KEY=$(cat /ocean/projects/cis260095p/ymiao6/.wandb_key)
+# wandb API key (create this file with: echo "YOUR_KEY" > /ocean/projects/cis260161p/ymiao6/.wandb_key)
+if [ -f /ocean/projects/cis260161p/ymiao6/.wandb_key ]; then
+    export WANDB_API_KEY=$(cat /ocean/projects/cis260161p/ymiao6/.wandb_key)
 fi
 
 # Create log directory

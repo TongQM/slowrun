@@ -95,6 +95,10 @@ parser.add_argument("--mup-base-depth", type=int, default=12,
 parser.add_argument("--mup-base-head-dim", type=int, default=64,
                     help="Reference d_head for CompleteP attention scale (sqrt(d_head_base) / d_head). "
                          "At constant head_dim across widths this collapses to the standard 1/sqrt(d_head).")
+parser.add_argument("--no-ve-projs", action="store_true", default=False,
+                    help="Disable the value-embedding projections (ve_projs) entirely. "
+                         "When set, ve = None is passed into attention so V is just c_v(x). "
+                         "Use to ablate ResFormer-style value injection from the architecture.")
 parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
                     choices=["init", "init_shuffle"],
                     help="'init' = different model inits, same data order; "
@@ -119,6 +123,15 @@ parser.add_argument("--single-model-idx", type=int, default=None,
                          "ensemble in this job. Seeds/data are computed as if in a full ensemble. "
                          "Skips ensemble eval (would only have 1 model); saves per-epoch "
                          "checkpoints to checkpoints/<run_id>/model_{i}_epoch_{k}.pt for later replay.")
+parser.add_argument("--no-warmdown", action="store_true", default=False,
+                    help="Disable LR warmdown — keep LR at full multiplier 1.0 throughout training. "
+                         "Equivalent to setting WARMDOWN_RATIO=0 and FINAL_LR_FRAC=1.0 for this run. "
+                         "Useful for resume-friendly experiments where the schedule shouldn't "
+                         "change when num-epochs is extended.")
+parser.add_argument("--checkpoint-every-n-steps", type=int, default=0,
+                    help="If >0, save model_{i}_step_{S}.pt every N optimizer steps in single-model "
+                         "mode. Used for finer-grained replay-time ensemble eval. Saved in addition "
+                         "to per-epoch checkpoints. 0 = disabled (default).")
 args = parser.parse_args()
 
 assert 0.0 < args.data_fraction <= 1.0, "--data-fraction must be in (0, 1]"
@@ -305,6 +318,7 @@ class GPTConfig:
     mup_base_width: int = 768
     mup_base_depth: int = 12
     mup_base_head_dim: int = 64
+    no_ve_projs: bool = False
     optimizer: str = "adamw"
 
 def norm(x):
@@ -468,7 +482,9 @@ class GPT(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.ve_projs = nn.ModuleDict({
+        # ve_projs is empty when --no-ve-projs is set; the forward path then sees
+        # str(i) not in self.ve_projs and passes ve=None into attention.
+        self.ve_projs = nn.ModuleDict({} if config.no_ve_projs else {
             str(i): BodyLinear(config.n_embd, kv_dim, fan_in_base=fib)
             for i in range(config.n_layer) if has_ve(i, config.n_layer)
         })
@@ -1628,20 +1644,53 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         m.to_empty(device=device)
         m.init_weights()
 
-        # Resume: find the latest model_{i}_epoch_{k}.pt in checkpoint_dir
-        latest = 0
+        # Resume: find the latest checkpoint of either kind for this model:
+        #   model_{i}_epoch_{k}.pt  -> resume at the start of epoch k+1
+        #   model_{i}_step_{S}.pt   -> resume from the step that S falls in. We always restart
+        #     the current epoch (data loader doesn't preserve mid-epoch state). So step S
+        #     means "epoch k completed where k = S // steps_per_epoch_optim".
+        latest_epoch = 0
+        latest_step = 0
+        latest_ckpt = None
+        # epoch ckpts
         for k in range(num_epochs, 0, -1):
             cp = os.path.join(checkpoint_dir, f"model_{i}_epoch_{k}.pt")
             if os.path.exists(cp):
-                latest = k
+                latest_epoch = k
+                latest_ckpt = cp
                 break
-        if latest > 0:
-            cp = os.path.join(checkpoint_dir, f"model_{i}_epoch_{latest}.pt")
-            state = torch.load(cp, map_location=device, weights_only=True)
-            m.load_state_dict(state)
-            del state
-            print0(f"  [model {i}] Resumed from {cp} (epoch {latest})")
-        resume_epoch[i] = latest
+        # step ckpts (parse S from filename, find max)
+        if os.path.isdir(checkpoint_dir):
+            for fn in os.listdir(checkpoint_dir):
+                if fn.startswith(f"model_{i}_step_") and fn.endswith(".pt"):
+                    try:
+                        S = int(fn[len(f"model_{i}_step_"):-len(".pt")])
+                    except ValueError:
+                        continue
+                    if S > latest_step:
+                        latest_step = S
+        # Decide which to use: pick whichever advances training furthest.
+        # An epoch_k ckpt corresponds to step = k * steps_per_epoch_optim (we don't know
+        # spe yet, so we approximate by deferring this to after spe is computed below).
+        # For now stash both; we resolve after spe is known.
+        resume_epoch[i] = latest_epoch
+        resume_step_file = (os.path.join(checkpoint_dir, f"model_{i}_step_{latest_step}.pt")
+                            if latest_step > 0 else None)
+        if latest_epoch > 0 or latest_step > 0:
+            # Provisional load: prefer step ckpt if it's strictly newer; we'll know after spe
+            # whether the step ckpt corresponds to a later point than the epoch ckpt.
+            # Simple rule: load step ckpt if no epoch ckpt; otherwise load epoch ckpt (we
+            # always finalize resume_epoch from epoch ckpt for the data-loader fast-forward).
+            if latest_ckpt is None and resume_step_file is not None:
+                state = torch.load(resume_step_file, map_location=device, weights_only=True)
+                m.load_state_dict(state)
+                del state
+                print0(f"  [model {i}] Resumed weights from {resume_step_file} (step {latest_step})")
+            elif latest_ckpt is not None:
+                state = torch.load(latest_ckpt, map_location=device, weights_only=True)
+                m.load_state_dict(state)
+                del state
+                print0(f"  [model {i}] Resumed weights from {latest_ckpt} (epoch {latest_epoch})")
 
         models[i] = m
         compiled_models[i] = maybe_compile(m)
@@ -1656,8 +1705,10 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                                 data_fraction=args.data_fraction)
         # Fast-forward the DataLoader to the resumed epoch so shuffle seeding
         # continues correctly. We advance epoch and reshuffle; pos stays at 0.
-        if latest > 0:
-            loaders[i].epoch = latest + 1
+        # (We use latest_epoch — step-only resumes don't fast-forward the loader,
+        # they restart the current epoch with a fresh shuffle.)
+        if latest_epoch > 0:
+            loaders[i].epoch = latest_epoch + 1
             loaders[i]._shuffle_and_shard()
 
     # Batch and iteration accounting (same for all models since same config)
@@ -1705,6 +1756,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "mup_base_width": config.mup_base_width,
                 "mup_base_depth": config.mup_base_depth,
                 "mup_base_head_dim": config.mup_base_head_dim,
+                "no_ve_projs": config.no_ve_projs,
                 "total_params": total_params,
             },
             "optimizer": {
@@ -1713,9 +1765,10 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "lr_multiplier": args.lr_multiplier,
                 "base_matrix_lr": args.matrix_lr,
                 "base_scalar_lr": args.scalar_lr,
-                "warmup_ratio": WARMUP_RATIO,
-                "warmdown_ratio": WARMDOWN_RATIO,
-                "final_lr_frac": FINAL_LR_FRAC,
+                "warmup_ratio": WARMUP_RATIO if not args.no_warmdown else 0.0,
+                "warmdown_ratio": WARMDOWN_RATIO if not args.no_warmdown else 0.0,
+                "final_lr_frac": FINAL_LR_FRAC if not args.no_warmdown else 1.0,
+                "no_warmdown": args.no_warmdown,
                 "param_groups": lr_groups,
             },
             "training": {
@@ -1731,6 +1784,7 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                 "ddp_world_size": ddp_world_size,
                 "data_fraction": args.data_fraction,
                 "compile_mode": args.compile_mode,
+                "checkpoint_every_n_steps": args.checkpoint_every_n_steps,
             },
             "ensemble": {
                 "type": ensemble_type,
@@ -1755,14 +1809,18 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
         print0(f"  Saved training config to {checkpoint_dir}/config.json")
 
     # LR schedule (shared — all models are identical config)
-    def get_lr_multiplier(it):
-        warmup = round(WARMUP_RATIO * num_iterations)
-        warmdown = round(WARMDOWN_RATIO * num_iterations)
-        if it < warmup: return (it + 1) / warmup
-        elif it <= num_iterations - warmdown: return 1.0
-        else:
-            progress = (num_iterations - it) / warmdown
-            return progress + (1 - progress) * FINAL_LR_FRAC
+    if args.no_warmdown:
+        def get_lr_multiplier(it):
+            return 1.0
+    else:
+        def get_lr_multiplier(it):
+            warmup = round(WARMUP_RATIO * num_iterations)
+            warmdown = round(WARMDOWN_RATIO * num_iterations)
+            if it < warmup: return (it + 1) / warmup
+            elif it <= num_iterations - warmdown: return 1.0
+            else:
+                progress = (num_iterations - it) / warmdown
+                return progress + (1 - progress) * FINAL_LR_FRAC
 
     def get_muon_momentum(it):
         return (1 - min(it / 300, 1)) * 0.85 + min(it / 300, 1) * 0.95
@@ -1898,6 +1956,14 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                     vbpb, vloss = _run_individual_val(i, epoch)
                     print0(f"    [model {i+1} val @ step {per_model_step[i]}] val_loss={vloss:.4f}")
 
+                # Per-N-step checkpoint save (single-model mode only — used for fine-grained
+                # post-hoc ensemble replay). Saved only by master process.
+                if (single_mode and master_process and args.checkpoint_every_n_steps > 0
+                        and per_model_step[i] % args.checkpoint_every_n_steps == 0):
+                    _step_ckpt = os.path.join(
+                        checkpoint_dir, f"model_{i}_step_{per_model_step[i]}.pt")
+                    torch.save(models[i].state_dict(), _step_ckpt)
+
             # Reset EMA at this model's epoch boundary
             smooth_train_loss[i] = 0.0
             mean_train_loss = epoch_loss_sum / max(1, epoch_loss_count)
@@ -1992,12 +2058,19 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     run_name = args.run if args.run else f"ensemble_{run_id}"
+    # Deterministic wandb id derived from run_name so resubmits with the same name
+    # continue logging on the existing wandb run instead of creating a new one.
+    # resume="allow" -> resume if id exists, fresh run otherwise.
+    import hashlib
+    _wandb_id = hashlib.sha256(run_name.encode("utf-8")).hexdigest()[:16]
     _wandb_kwargs = {"project": "slowrun", "name": run_name,
+                     "id": _wandb_id, "resume": "allow",
                      "config": {"optimizer": args.optimizer, "completep": args.completep,
                                 "ensemble_type": args.ensemble_type, "ensemble_mode": args.ensemble_mode,
                                 "mup_base_width": args.mup_base_width,
                                 "mup_base_depth": args.mup_base_depth,
                                 "mup_base_head_dim": args.mup_base_head_dim,
+                                "no_ve_projs": args.no_ve_projs,
                                 "n_layer": DEPTH, "n_embd": N_EMBD, "n_head": N_HEAD,
                                 "num_models": args.num_models, "num_epochs": args.num_epochs,
                                 "dropout": args.dropout, "weight_decay": WEIGHT_DECAY}}
@@ -2009,10 +2082,10 @@ def main():
     # to wandb's implicit step counter, which is shared across all log calls).
     if master_process:
         for i in range(args.num_models):
-            wandb_run.define_metric(f"model_{i+1}/step")
-            wandb_run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/step")
-        wandb_run.define_metric("ens/epoch")
-        wandb_run.define_metric("ens/*", step_metric="ens/epoch")
+            wandb_run.define_metric(f"model_{i+1}/tokens_seen")
+            wandb_run.define_metric(f"model_{i+1}/*", step_metric=f"model_{i+1}/tokens_seen")
+        wandb_run.define_metric("ens/tokens_seen")
+        wandb_run.define_metric("ens/*", step_metric="ens/tokens_seen")
 
     # Tokenizer + token_bytes
     encoder = tiktoken.get_encoding("gpt2")
@@ -2030,6 +2103,7 @@ def main():
                        completep=args.completep,
                        mup_base_width=args.mup_base_width, mup_base_depth=args.mup_base_depth,
                        mup_base_head_dim=args.mup_base_head_dim,
+                       no_ve_projs=args.no_ve_projs,
                        optimizer=args.optimizer)
 
     # Print config

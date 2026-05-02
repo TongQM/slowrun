@@ -26,7 +26,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-TS=$(date +%Y%m%d_%H%M%S)
+# TS=<existing_timestamp> bash launch.sh  -> reuse existing checkpoint dirs and
+# wandb runs (resume training from the latest per-epoch checkpoint, continue
+# logging on the same wandb run). Otherwise a fresh timestamp is generated.
+TS="${TS:-$(date +%Y%m%d_%H%M%S)}"
 WANDB_GROUP="completep_diag_df${DATA_FRACTION:-0.1}_${TS}"
 GPU_SPEC="${GPU_SPEC:-h100-80:1}"
 TIME_LIMIT="${TIME_LIMIT:-2:00:00}"
@@ -52,7 +55,7 @@ submit() {
     # Build a comma-separated --export list, including any forwarded overrides.
     local EXPORTS="ALL,N_LAYER=$L,N_HEAD=$H,N_EMBD=$W,RUN_ID=$RUN_ID,RUN_NAME=$RUN_NAME,WANDB_GROUP=$WANDB_GROUP"
     for v in NUM_EPOCHS DATA_FRACTION TOTAL_BATCH_SIZE OPTIMIZER COMPILE_MODE \
-             MUP_BASE_WIDTH MUP_BASE_DEPTH MUP_BASE_HEAD_DIM; do
+             MUP_BASE_WIDTH MUP_BASE_DEPTH MUP_BASE_HEAD_DIM NO_VE_PROJS; do
         if [ -n "${!v:-}" ]; then EXPORTS+=",$v=${!v}"; fi
     done
 
