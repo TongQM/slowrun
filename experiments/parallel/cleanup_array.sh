@@ -10,16 +10,18 @@
 #SBATCH --output=experiments/logs/%x_%A_%a.out
 #SBATCH --error=experiments/logs/%x_%A_%a.err
 #
-# Per-(cell, strategy) cleanup: after replay finishes, delete step-based
-# checkpoints that aren't on a permanent stride. Keeps:
-#   - all model_*_epoch_*.pt (kept for resume)
+# Per-(cell, strategy) cleanup: after replay finishes, prune transient ckpts.
+# Keeps:
 #   - model_*_step_{S}.pt where S % PERMANENT_EVERY_N_STEPS == 0
+#   - model_*_epoch_{k}.pt where k % PERMANENT_EVERY_N_EPOCHS == 0
+# Deletes everything else.
 #
 # Required env vars (set by launch_grid_v2.sh):
 #   SHARED_TIMESTAMP  (per-cell timestamp, identifies the run dir)
 #   PERMANENT_EVERY_N_STEPS  (stride for permanent step ckpts; e.g. 760)
 #
 # Optional:
+#   PERMANENT_EVERY_N_EPOCHS  (stride for permanent per-epoch ckpts; default 5)
 #   CHECKPOINT_BASE  (default "checkpoints")
 #
 # This is a 2-task array: index 0 = init_ens, 1 = init_shuffle_ens.
@@ -29,6 +31,7 @@ set -euo pipefail
 : "${SHARED_TIMESTAMP:?SHARED_TIMESTAMP not set}"
 : "${PERMANENT_EVERY_N_STEPS:?PERMANENT_EVERY_N_STEPS not set}"
 
+PERMANENT_EVERY_N_EPOCHS="${PERMANENT_EVERY_N_EPOCHS:-5}"
 CHECKPOINT_BASE="${CHECKPOINT_BASE:-checkpoints}"
 cd /ocean/projects/cis260161p/ymiao6/scaling/slowrun
 
@@ -41,7 +44,8 @@ esac
 CKPT_DIR="${CHECKPOINT_BASE}/parallel_${STRATEGY_NAME}_${SHARED_TIMESTAMP}"
 echo "============================================================"
 echo "Cleanup: ${CKPT_DIR}"
-echo "  Permanent stride: every ${PERMANENT_EVERY_N_STEPS} steps"
+echo "  Permanent stride: every ${PERMANENT_EVERY_N_STEPS} steps  (step ckpts)"
+echo "  Permanent stride: every ${PERMANENT_EVERY_N_EPOCHS} epochs (epoch ckpts)"
 echo "============================================================"
 
 if [ ! -d "$CKPT_DIR" ]; then
@@ -51,14 +55,12 @@ fi
 
 del=0; del_bytes=0; keep=0; keep_bytes=0
 
-# Iterate step ckpts; delete those whose step is NOT a multiple of PERMANENT_EVERY_N_STEPS.
+# --- step ckpts ---
 while IFS= read -r f; do
     base=$(basename "$f")
-    # Extract step value: model_<i>_step_<S>.pt
     S=$(echo "$base" | sed -E 's/^model_[0-9]+_step_([0-9]+)\.pt$/\1/')
     if ! [[ "$S" =~ ^[0-9]+$ ]]; then
-        echo "  skip (regex mismatch): $base"
-        continue
+        echo "  skip (regex mismatch): $base"; continue
     fi
     sz=$(stat -L -c %s "$f" 2>/dev/null || echo 0)
     if [ $((S % PERMANENT_EVERY_N_STEPS)) -eq 0 ]; then
@@ -68,12 +70,29 @@ while IFS= read -r f; do
     fi
 done < <(find -L "$CKPT_DIR" -maxdepth 1 -name 'model_*_step_*.pt' 2>/dev/null)
 
+# --- per-epoch ckpts ---
+ep_del=0; ep_del_bytes=0; ep_keep=0; ep_keep_bytes=0
+while IFS= read -r f; do
+    base=$(basename "$f")
+    K=$(echo "$base" | sed -E 's/^model_[0-9]+_epoch_([0-9]+)\.pt$/\1/')
+    if ! [[ "$K" =~ ^[0-9]+$ ]]; then
+        echo "  skip (regex mismatch): $base"; continue
+    fi
+    sz=$(stat -L -c %s "$f" 2>/dev/null || echo 0)
+    if [ $((K % PERMANENT_EVERY_N_EPOCHS)) -eq 0 ]; then
+        ep_keep=$((ep_keep+1)); ep_keep_bytes=$((ep_keep_bytes+sz))
+    else
+        rm -f "$f" && ep_del=$((ep_del+1)) && ep_del_bytes=$((ep_del_bytes+sz))
+    fi
+done < <(find -L "$CKPT_DIR" -maxdepth 1 -name 'model_*_epoch_*.pt' 2>/dev/null)
+
 echo
 echo "Cleanup summary for ${STRATEGY_NAME}:"
-echo "  step ckpts deleted: ${del}  ($((del_bytes/1024/1024)) MB)"
-echo "  step ckpts kept:    ${keep} ($((keep_bytes/1024/1024)) MB)"
+echo "  step  ckpts deleted: ${del}    ($((del_bytes/1024/1024)) MB)"
+echo "  step  ckpts kept:    ${keep}   ($((keep_bytes/1024/1024)) MB)"
+echo "  epoch ckpts deleted: ${ep_del} ($((ep_del_bytes/1024/1024)) MB)"
+echo "  epoch ckpts kept:    ${ep_keep} ($((ep_keep_bytes/1024/1024)) MB)"
 
-# Show final state
 n_epoch=$(find -L "$CKPT_DIR" -maxdepth 1 -name 'model_*_epoch_*.pt' 2>/dev/null | wc -l)
 n_step=$(find -L "$CKPT_DIR"  -maxdepth 1 -name 'model_*_step_*.pt'  2>/dev/null | wc -l)
 echo "  remaining files: ${n_epoch} epoch ckpts, ${n_step} step ckpts"

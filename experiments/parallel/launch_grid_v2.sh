@@ -65,6 +65,10 @@ CIS009=/ocean/projects/cis260009p/ymiao6/scaling/slowrun/checkpoints
 CIS095=/ocean/projects/cis260095p/ymiao6/scaling/slowrun/checkpoints
 
 # Per-cell config: "tag:L:H:W:DEST:CADENCE:PERM_STRIDE"
+# - CADENCE=0 disables step ckpts (relies on per-epoch ckpts only); used for the
+#   largest cell where step ckpts at cadence=305 would exactly duplicate per-epoch.
+# - PERM_STRIDE only matters for step ckpts; per-epoch ckpts are pruned to every 5th
+#   epoch by cleanup (PERMANENT_EVERY_N_EPOCHS=5).
 # (smallest-to-largest by 2*single_strat_transient_size)
 declare -a CELLS=(
     "d6_w384:6:6:384:$CIS161:152:760"
@@ -75,7 +79,7 @@ declare -a CELLS=(
     "d24_w768:24:12:768:$CIS161:152:760"
     "d6_w1536:6:24:1536:$CIS161:152:760"
     "d12_w1536:12:24:1536:$CIS161:152:760"
-    "d24_w1536:24:24:1536:$CIS009:305:1525"
+    "d24_w1536:24:24:1536:$CIS009:0:0"
 )
 
 mkdir -p "$CIS161" "$CIS009" "$CIS095" experiments/logs
