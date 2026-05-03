@@ -94,10 +94,11 @@ Outputs: `grid_combo_20260430_152533.png`, `slice_*.png`, `heatmap_best_val_loss
 - Design: 1 cell × 2 strategies × **20 individuals** × 25 epochs at d12/w768, df=0.2.
 - Replay at sizes {2, 5, 10, 15, 20} per strategy.
 - Constant LR + CompleteP + no-ve-projs (matches the rest of the new grid; **the original df=0.2 grid `grid_20260430_152533` had trapezoidal LR and is *not* directly comparable**).
-- Storage: cis260095p (~500 GB transient peak — won't fit cis260161p alongside the in-flight df=0.4 grid). Compute: cis260161p. Cost: ~115 SU.
-- Wandb group: `q2_ensemble_size_q2_<TAG>_d12_w768_df0.2`.
-- Launcher: [experiments/parallel/launch_q2_ensemble_size_sweep.sh](experiments/parallel/launch_q2_ensemble_size_sweep.sh).
-- SLURM: 40532724 train + 40532725 replay + 40532726 cleanup.
+- Storage: cis260095p (~500 GB transient peak — won't fit cis260161p alongside the in-flight df=0.4 grid). Compute: cis260161p. Cost: ~100 SU (15 SU saved by fused replay).
+- **Fused replay**: uses `replay_fused.py` instead of `replay.py`. One task per strategy (2 total, vs the usual 10 = 5 sizes × 2 strats); each task forwards each of the N=20 models once per evaluation point and computes ensemble val for all sizes via cumulative logit-sum. ~60% fewer forward passes vs the per-size replay.
+- Wandb group: `q2_ensemble_size_q2_<TAG>_d12_w768_df0.2`. One run per (strategy, ens_size) — same schema as the per-size replay, so analysis tools (plot.py) need no changes.
+- Launcher: [experiments/parallel/launch_q2_ensemble_size_sweep.sh](experiments/parallel/launch_q2_ensemble_size_sweep.sh) (submits train + per-size replay) + manual swap to [experiments/parallel/replay_array_fused.sh](experiments/parallel/replay_array_fused.sh) for the actual replay step.
+- SLURM: 40532724 train + 40533112 fused-replay + 40533113 cleanup.
 
 ### Grid 3: TBD (post-Q1/Q2)
 
