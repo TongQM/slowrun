@@ -76,14 +76,36 @@ Outputs: `grid_combo_20260430_152533.png`, `slice_*.png`, `heatmap_best_val_loss
 **Hypothesis to verify:**
 - Will overfit appear within 25 epochs at 2× more unique data? Smaller cells (d6/w384, d12/w384) likely *will not* — the d6/w384 trajectory through epoch 25 is still descending. Larger cells will. Decision on whether to extend to 50 epochs deferred until full grid lands.
 
-### Grid 3: TBD
+### Targeted experiment Q1: data-size ablation at d12/w768 (IN FLIGHT)
 
-Possible candidates (ordered by likely value):
-1. **Resume df=0.4 grid to 50 epochs** for the cells that haven't overfit. Constant-LR makes this seamless: load `model_*_epoch_25.pt`, continue another 25 epochs. Resume-friendly by design.
-2. **df=0.1 grid** (10M tokens/epoch × 25 epochs = 250M total): see overfit faster on small models; 4× smaller compute than df=0.4.
-3. **df=1.0 grid** (100M tokens/epoch — full data, single epoch each pass): hopefully shows when ensembling stops helping at scale; expensive (5× df=0.2 compute).
-4. **Optimizer ablation**: rerun a row at `--optimizer hybrid` or `--optimizer muon` to compare with AdamW.
-5. **Warmdown ablation**: rerun a cell at `df=0.4` with the original trapezoidal schedule to verify constant LR doesn't change the conclusions.
+- Goal: locate the **overfit-onset epoch as a function of data fraction** at the base model size.
+- Design: 4 dfs × 2 individuals (one `init_ens` + one `init_shuffle_ens`) × **50 epochs** at d12/w768.
+- Dfs: {0.2, 0.4, 0.6, 0.8} — twice as much unique data each time.
+- Constant LR (`--no-warmdown`) + CompleteP + no-ve-projs throughout, fully comparable across df values.
+- No ensembling step (1 individual per strategy is sufficient to read off overfit-onset).
+- Storage: cis260161p. Compute: cis260161p. Cost: ~85 SU.
+- Wandb groups: `q1_data_size_q1_<TAG>_d12_w768_df{0.2,0.4,0.6,0.8}`.
+- Launcher: [experiments/parallel/launch_q1_data_size_sweep.sh](experiments/parallel/launch_q1_data_size_sweep.sh).
+- SLURM: 40532716–40532723 (8 train + 8 cleanup tasks).
+
+### Targeted experiment Q2: ensemble-size sweep up to N=20 at d12/w768, df=0.2 (IN FLIGHT)
+
+- Goal: locate **ensemble saturation** — does val loss continue improving past N=5 ensemble members, and where does it plateau?
+- Design: 1 cell × 2 strategies × **20 individuals** × 25 epochs at d12/w768, df=0.2.
+- Replay at sizes {2, 5, 10, 15, 20} per strategy.
+- Constant LR + CompleteP + no-ve-projs (matches the rest of the new grid; **the original df=0.2 grid `grid_20260430_152533` had trapezoidal LR and is *not* directly comparable**).
+- Storage: cis260095p (~500 GB transient peak — won't fit cis260161p alongside the in-flight df=0.4 grid). Compute: cis260161p. Cost: ~115 SU.
+- Wandb group: `q2_ensemble_size_q2_<TAG>_d12_w768_df0.2`.
+- Launcher: [experiments/parallel/launch_q2_ensemble_size_sweep.sh](experiments/parallel/launch_q2_ensemble_size_sweep.sh).
+- SLURM: 40532724 train + 40532725 replay + 40532726 cleanup.
+
+### Grid 3: TBD (post-Q1/Q2)
+
+Possible follow-ups (ordered by likely value):
+1. **Resume df=0.4 grid to 50 epochs** for the cells that haven't overfit. Constant-LR makes this seamless: load `model_*_epoch_25.pt`, continue another 25 epochs.
+2. **df=0.1 grid** (10M tokens/epoch × 25 epochs = 250M total): faster overfit + sanity-check the data-size dependence on the full 9-cell grid (Q1 only does d12/w768).
+3. **Optimizer ablation**: rerun a row at `--optimizer hybrid` or `--optimizer muon` vs AdamW.
+4. **Warmdown ablation**: rerun a cell at `df=0.4` with the original trapezoidal schedule to verify constant LR doesn't change conclusions.
 
 ## What's measured
 
@@ -108,11 +130,13 @@ When new grids land, regenerate the figures with the new grid tags and update th
 
 ## Compute & storage accounting
 
-| Grid | SU charged | Allocation(s) | Storage |
+| Grid / experiment | SU charged | Allocation(s) | Storage |
 |---|---|---|---|
-| df=0.2 | ~600 SU | cis260161p | active grid moved off-PSC to GDrive (in progress); permanents on PSC, every-5-epoch ckpts only |
+| df=0.2 grid | ~600 SU | cis260161p | active grid moved off-PSC to GDrive (in progress); permanents on PSC, every-5-epoch ckpts only |
 | df=0.4 cells 1–3 | ~135 SU | cis260161p | cis260161p |
-| df=0.4 cells 4–9 | ~1230 SU | cis260009p | cis260161p (≤1 TB) + cis260095p (≤600 GB) |
+| df=0.4 cells 4–9 (waves A–D) | ~1230 SU | cis260009p | cis260161p (≤1 TB) + cis260095p (≤600 GB) |
+| Q1 data-size ablation | ~85 SU | cis260161p | cis260161p |
+| Q2 ensemble-size sweep | ~115 SU | cis260161p | cis260095p |
 
 ## Engineering notes
 
