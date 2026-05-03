@@ -170,37 +170,41 @@ def main():
         batch_iter = iter(val_loader)
 
         eval_t0 = time.time()
-        for step in range(ens_eval_steps):
-            x, y, _ = next(batch_iter)
-            flat_y = y.view(-1)
-            mask = flat_y != -1
+        # Explicit no_grad — model.eval() only disables dropout/batchnorm; without
+        # no_grad, every forward pass keeps activations alive for a hypothetical
+        # backward, blowing memory at N=20.
+        with torch.no_grad():
+            for step in range(ens_eval_steps):
+                x, y, _ = next(batch_iter)
+                flat_y = y.view(-1)
+                mask = flat_y != -1
 
-            num_bytes = token_bytes[flat_y.clamp(min=0)]
-            valid_bytes = (num_bytes > 0)
+                num_bytes = token_bytes[flat_y.clamp(min=0)]
+                valid_bytes = (num_bytes > 0)
 
-            # Per-batch byte / token totals (computed once)
-            total_tokens += mask.sum()
-            total_bytes += num_bytes[mask].sum()
+                # Per-batch byte / token totals (computed once)
+                total_tokens += mask.sum()
+                total_bytes += num_bytes[mask].sum()
 
-            # Cumulative logit sum across N models, snapshot at each target size
-            logit_sum = None
-            for i, m in enumerate(models):
-                with autocast_ctx:
-                    logits = m.forward_logits(x).float()
-                flat_logits = logits.view(-1, logits.size(-1))
-                if logit_sum is None:
-                    logit_sum = torch.zeros_like(flat_logits)
-                logit_sum += flat_logits
-                del logits, flat_logits
+                # Cumulative logit sum across N models, snapshot at each target size
+                logit_sum = None
+                for i, m in enumerate(models):
+                    with autocast_ctx:
+                        logits = m.forward_logits(x).float()
+                    flat_logits = logits.view(-1, logits.size(-1))
+                    if logit_sum is None:
+                        logit_sum = torch.zeros_like(flat_logits)
+                    logit_sum += flat_logits
+                    del logits, flat_logits
 
-                S = i + 1
-                if S in sizes:
-                    avg_logits = logit_sum / S
-                    loss_per_pos = F.cross_entropy(avg_logits, flat_y.clamp(min=0), reduction='none')
-                    total_loss[S] += loss_per_pos[mask].sum().double()
-                    total_nats[S] += (loss_per_pos[mask].double() * valid_bytes[mask].double()).sum()
-                    del avg_logits, loss_per_pos
-            del logit_sum
+                    S = i + 1
+                    if S in sizes:
+                        avg_logits = logit_sum / S
+                        loss_per_pos = F.cross_entropy(avg_logits, flat_y.clamp(min=0), reduction='none')
+                        total_loss[S] += loss_per_pos[mask].sum().double()
+                        total_nats[S] += (loss_per_pos[mask].double() * valid_bytes[mask].double()).sum()
+                        del avg_logits, loss_per_pos
+                del logit_sum
         eval_dt = time.time() - eval_t0
 
         # Finalize per-size loss/bpb
