@@ -763,6 +763,151 @@ def plot_heatmap(args):
     print(f"Saved {args.out}")
 
 
+def plot_q1(args):
+    """Q1 data-size sweep: per-df val loss curves on one figure.
+
+    --strategies: which strategies to plot (default both; pass single value for
+                  paper-figure use where init vs init+shuffle is irrelevant).
+    --x-axis:     "epoch" (default) or "tokens".
+    """
+    api = wandb.Api()
+    dfs = list(args.dfs)
+    strategies = list(args.strategies)
+    x_axis = args.x_axis
+
+    cmap = cm.get_cmap("viridis")
+    df_colors = {df: cmap(i / max(1, len(dfs) - 1)) for i, df in enumerate(dfs)}
+    strat_styles = {"init_ens": "-", "init_shuffle_ens": "--"}
+    strat_labels = {"init_ens": "init", "init_shuffle_ens": "init+shuffle"}
+    show_strat_in_label = len(strategies) > 1
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+
+    max_x = 0
+    for df in dfs:
+        group = f"q1_data_size_{args.grid_tag}_d{args.depth}_w{args.width}_df{df}"
+        tpe = float(df) * 99942400  # tokens_per_epoch (df=0.2 → 19988480, etc.)
+        for strat in strategies:
+            run_name = f"{group}_{strat}_model0"
+            runs = _all_runs(api, group, run_name)
+            if not runs:
+                print(f"  MISSING: {run_name}")
+                continue
+            toks, losses = _merge_individual_val_tokens_curves(runs)
+            if len(toks) == 0:
+                print(f"  EMPTY: {run_name}")
+                continue
+            xs = toks if x_axis == "tokens" else (toks / tpe)
+            max_x = max(max_x, float(xs.max()))
+            label = f"df={df}" + (f", {strat_labels[strat]}" if show_strat_in_label else "")
+            ax.plot(xs, losses,
+                    color=df_colors[df], linestyle=strat_styles[strat],
+                    linewidth=2.0, alpha=0.95, label=label)
+            # Mark the minimum to stress non-monotonicity
+            i_min = int(np.argmin(losses))
+            ax.plot([xs[i_min]], [losses[i_min]], marker="v",
+                    color=df_colors[df], markersize=9,
+                    markeredgecolor="black", markeredgewidth=0.6, zorder=5)
+            print(f"  {run_name}: {len(toks)} pts, "
+                  f"x {xs[0]:.2f}..{xs[-1]:.2f}, min {losses.min():.4f} @ x={xs[i_min]:.2f}, "
+                  f"end {losses[-1]:.4f}")
+
+    if x_axis == "tokens":
+        ax.set_xlabel("tokens seen (per model, including multi-epoch repeats)")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
+    else:
+        ax.set_xlabel("epoch")
+        max_epoch_int = int(np.ceil(max_x))
+        for k in range(1, max_epoch_int + 1):
+            ax.axvline(x=k, color="gray", linestyle="-",
+                       alpha=0.10 if k % 5 else 0.35,
+                       linewidth=0.5 if k % 5 else 0.8)
+
+    ax.set_ylabel("val loss")
+    ax.set_title(f"Q1: data-size ablation at d{args.depth}/w{args.width}  |  "
+                 f"val resolution = 20M tokens  |  tag {args.grid_tag}")
+    ax.legend(loc="upper right", fontsize=11)
+    ax.grid(True, alpha=0.20)
+    if args.ymin is not None or args.ymax is not None:
+        cur = ax.get_ylim()
+        ax.set_ylim(args.ymin if args.ymin is not None else cur[0],
+                    args.ymax if args.ymax is not None else cur[1])
+    plt.tight_layout()
+    plt.savefig(args.out, dpi=150)
+    print(f"\nSaved {args.out}")
+
+
+def plot_q2_individuals(args):
+    """Q2 supplementary: 20 individuals' val loss trajectories at d12/w768 df=0.2.
+    Stresses that overfit-onset varies seed-to-seed at the same config.
+
+    --strategies: which strategy(ies) to plot (default init_ens — single strategy
+                  keeps the figure clean; init+shuffle is similar).
+    --x-axis:     "tokens" (default) or "epoch".
+    """
+    import seaborn as sns
+    sns.set(font_scale=1.5)
+    sns.set_style('whitegrid')
+
+    api = wandb.Api()
+    group = args.wandb_group
+    strategies = list(args.strategies)
+    num_models = args.num_models
+    x_axis = args.x_axis
+    df = args.data_fraction
+    tpe = float(df) * 99942400  # tokens per epoch
+
+    # Use rocket palette (warm, sequential) for the model collection
+    # Single strategy: gradient by model index. Multi-strat: use distinct sub-palettes.
+    sns.set_palette('rocket', num_models)
+    rocket_colors = sns.color_palette('rocket', num_models)
+    cool_colors = sns.color_palette('cool', num_models)
+    strat_palettes = {"init_ens": rocket_colors, "init_shuffle_ens": cool_colors}
+    strat_labels = {"init_ens": "init", "init_shuffle_ens": "init+shuffle"}
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+
+    for strat in strategies:
+        palette = strat_palettes[strat]
+        first_for_strat = True
+        for m in range(num_models):
+            run_name = f"{group}_{strat}_model{m}"
+            runs = _all_runs(api, group, run_name)
+            if not runs:
+                print(f"  MISSING: {run_name}")
+                continue
+            toks, losses = _merge_individual_val_tokens_curves(runs)
+            if len(toks) == 0:
+                continue
+            xs = toks if x_axis == "tokens" else (toks / tpe)
+            label = (f"{strat_labels[strat]} (N={num_models} individuals)"
+                     if first_for_strat else None)
+            ax.plot(xs, losses, color=palette[m], alpha=0.65, linewidth=1.3,
+                    label=label)
+            first_for_strat = False
+            i_min = int(np.argmin(losses))
+            ax.plot([xs[i_min]], [losses[i_min]], marker="v",
+                    color=palette[m], alpha=0.9, markersize=6,
+                    markeredgecolor="black", markeredgewidth=0.4, zorder=3)
+
+    if x_axis == "tokens":
+        ax.set_xlabel("tokens seen (per model, multi-epoch repeats included)")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
+    else:
+        ax.set_xlabel("epoch")
+
+    ax.set_ylabel("val loss")
+    ax.set_title(f"{num_models} individual val trajectories at d12/w768, df={df}")
+    ax.legend(loc="upper left", framealpha=0.95)
+    if args.ymin is not None or args.ymax is not None:
+        cur = ax.get_ylim()
+        ax.set_ylim(args.ymin if args.ymin is not None else cur[0],
+                    args.ymax if args.ymax is not None else cur[1])
+    plt.tight_layout()
+    plt.savefig(args.out)
+    print(f"\nSaved {args.out}")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -853,6 +998,37 @@ def main():
     p_heat.add_argument("--num-models", type=int, default=5)
     p_heat.add_argument("--out", required=True)
     p_heat.set_defaults(fn=plot_heatmap)
+
+    # ---- q1: data-size ablation, 4 dfs × 2 strategies on one figure ----
+    p_q1 = sub.add_parser("q1", help="Q1 data-size ablation: val curves across dfs and strategies on one figure")
+    p_q1.add_argument("--grid-tag", required=True,
+                      help="GRID_TAG used in q1_data_size_<TAG>_d<L>_w<W>_df<df> group naming")
+    p_q1.add_argument("--depth", type=int, default=12)
+    p_q1.add_argument("--width", type=int, default=768)
+    p_q1.add_argument("--dfs", nargs="+", default=["0.2", "0.4", "0.6", "0.8"])
+    p_q1.add_argument("--out", default="experiments/analysis/q1_data_size.png")
+    p_q1.add_argument("--ymin", type=float, default=None)
+    p_q1.add_argument("--ymax", type=float, default=None)
+    p_q1.add_argument("--strategies", nargs="+",
+                      default=["init_ens", "init_shuffle_ens"],
+                      choices=["init_ens", "init_shuffle_ens"])
+    p_q1.add_argument("--x-axis", default="epoch", choices=["epoch", "tokens"])
+    p_q1.set_defaults(fn=plot_q1)
+
+    # ---- q2-individuals: 20 trajectories overfit demo ----
+    p_q2i = sub.add_parser("q2-individuals",
+                           help="Q2: per-individual val curves (no ensembling), to show overfit-onset variability")
+    p_q2i.add_argument("--wandb-group", required=True,
+                       help="e.g. q2_ensemble_size_q2_<TAG>_d12_w768_df0.2")
+    p_q2i.add_argument("--num-models", type=int, default=20)
+    p_q2i.add_argument("--strategies", nargs="+", default=["init_ens"],
+                       choices=["init_ens", "init_shuffle_ens"])
+    p_q2i.add_argument("--data-fraction", default="0.2")
+    p_q2i.add_argument("--x-axis", default="tokens", choices=["epoch", "tokens"])
+    p_q2i.add_argument("--ymin", type=float, default=None)
+    p_q2i.add_argument("--ymax", type=float, default=None)
+    p_q2i.add_argument("--out", required=True)
+    p_q2i.set_defaults(fn=plot_q2_individuals)
 
     args = p.parse_args()
     args.fn(args)

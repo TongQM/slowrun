@@ -21,7 +21,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-GRID_TAG="${GRID_TAG:-q1v2_$(date +%Y%m%d_%H%M%S)}"
+GRID_TAG="${GRID_TAG:-q1v3_$(date +%Y%m%d_%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
 
 ACCOUNT=cis260161p
@@ -48,11 +48,12 @@ CIS161=/ocean/projects/cis260161p/ymiao6/scaling/slowrun/checkpoints
 DEST="$CIS161"
 mkdir -p "$DEST" experiments/logs
 
-declare -a DFS=(0.2 0.3 0.4 0.5)
+declare -a DFS=(0.6 0.7 0.8 0.9 1.0)
 L=12; H=12; W=768
 
 echo "============================================================"
-echo "Q1 v2 data-size sweep: d${L}/w${W}, dfs=${DFS[*]}, wd=$WEIGHT_DECAY"
+echo "Q1 v3 (extension): d${L}/w${W}, dfs=${DFS[*]}, wd=$WEIGHT_DECAY"
+echo "  Anchors L_0 by extending Q1 v2 to larger P (df → 1.0)"
 echo "  TOKEN_BUDGET=$TOKEN_BUDGET (~$(($TOKEN_BUDGET / 1000000))M tokens per run)"
 echo "  1 ind per strategy, 2 strats per cell"
 echo "  ACCOUNT=$ACCOUNT, DEST=$DEST, GPU=$GPU_SPEC, compile=$COMPILE_MODE"
@@ -100,12 +101,12 @@ submit_cell() {
 
     # Train: 2 tasks (init_ens model 0 + init_shuffle_ens model 0)
     local TJOB
-    TJOB=$(submit_one "q1v2_train_d12_w768_df${df}" "" "$timelim" "0-1" "$exports" experiments/parallel/train_array.sh)
+    TJOB=$(submit_one "q1v3_train_d12_w768_df${df}" "" "$timelim" "0-1" "$exports" experiments/parallel/train_array.sh)
     echo "  df=$df  epochs=$NUM_EPOCHS_DF  train  job=$TJOB  timelim=$timelim  group=$GROUP" >&2
 
     # Cleanup: 2 tasks (one per strategy)
     local CJOB
-    CJOB=$(submit_one "q1v2_cleanup_d12_w768_df${df}" "--dependency=afterok:$TJOB" "00:30:00" "0-1" "$exports" experiments/parallel/cleanup_array.sh)
+    CJOB=$(submit_one "q1v3_cleanup_d12_w768_df${df}" "--dependency=afterok:$TJOB" "00:30:00" "0-1" "$exports" experiments/parallel/cleanup_array.sh)
     echo "  df=$df  clean  job=$CJOB  (after $TJOB)" >&2
 }
 

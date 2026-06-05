@@ -30,6 +30,40 @@ These are baked into every launcher in this repo and apply to every new run unle
 
 **Wandb x-axis convention:** all curves use cumulative `tokens_seen` (per-model, including multi-epoch repeats), set as `step_metric` for both `model_{i}/*` and `ens/*`. Not optimizer step. This makes plots directly readable as "how does val loss evolve as each model re-reads the fixed dataset" — the central question of the project.
 
+**Plot styling convention.** Standard setup at the top of any plotting function (executive decision; project-wide default):
+
+```python
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.set(font_scale=1.5)
+sns.set_style('whitegrid')
+sns.set_palette('cool', len(num_lines))   # default — pick palette size up-front
+
+plt.rcParams['axes.labelsize']  = 24
+plt.rcParams['axes.linewidth']  = 4.0      # thick bounding box
+plt.rcParams['legend.fontsize'] = 18
+plt.rcParams['grid.alpha']      = 0.25
+plt.rcParams['xtick.labelsize'] = 20
+plt.rcParams['ytick.labelsize'] = 20
+```
+
+Plot defaults:
+- **Palette: `cool`** (sequential, perceptually uniform). Alt: `rocket` for warm-sequential, `magma` for high-contrast. Don't mix palettes within one figure.
+- **Linewidth: thick (`lw=3.0` for primary lines; `lw=2.5` for reference dashed lines).** Helps multi-panel readability.
+- **Save format: PDF for paper, save with `bbox_inches='tight'` and `dpi=300`** (high DPI matters when journal rasterizes).
+- **Axis labels: `fontsize=28` for math notation; default `axes.labelsize=24` otherwise.**
+- **Bands for std/CI**: `plt.fill_between(..., color=f'C{i}', alpha=0.1)` matching the line color.
+
+Example (per-line band + dashed reference fit):
+```python
+for i, line in enumerate(lines):
+    plt.loglog(xs, line, label=f'N = {N[i]}', lw=3.0)
+    plt.fill_between(xs, line - std[i], line + std[i], color=f'C{i}', alpha=0.1)
+    plt.loglog(xs, fit[i], '--', color='black', lw=2.5)
+plt.savefig('fig.pdf', bbox_inches='tight', dpi=300)
+```
+
 ## Experiment Setup
 
 ### Primary Script

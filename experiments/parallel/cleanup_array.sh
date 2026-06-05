@@ -4,9 +4,12 @@
 #SBATCH --account=cis260161p
 #SBATCH --gpus=h100-80:1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=00:30:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
+#SBATCH --time=00:15:00
+# Was on v100-32 to save SU, but V100 GPU-shared has been under maintenance
+# reservation since 2026-05-04, blocking cleanup jobs. H100 is more reliable
+# despite the 2× SU rate; cleanup is small (~5 min) so cost is ~1 SU/run.
 #SBATCH --output=experiments/logs/%x_%A_%a.out
 #SBATCH --error=experiments/logs/%x_%A_%a.err
 #

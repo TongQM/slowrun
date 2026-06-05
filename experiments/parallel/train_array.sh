@@ -40,6 +40,12 @@ if [ -f /ocean/projects/cis260161p/ymiao6/.wandb_key ]; then
 fi
 mkdir -p experiments/logs
 
+# Compute nodes have flaky outbound networking. Use a shared, pre-populated
+# tiktoken cache (avoids 'openaipublic.blob.core.windows.net' downloads), and
+# default to wandb offline mode (sync from login node later via `wandb sync`).
+export TIKTOKEN_CACHE_DIR=/ocean/projects/cis260161p/ymiao6/.tiktoken_cache
+export WANDB_MODE="${WANDB_MODE:-offline}"
+
 # --- Configuration (overridable via env vars from experiments/parallel/launch.sh) ---
 N_LAYER="${N_LAYER:-12}"
 N_HEAD="${N_HEAD:-12}"
@@ -80,6 +86,9 @@ if [ "${CHECKPOINT_EVERY_N_STEPS:-0}" -gt 0 ] 2>/dev/null; then
 fi
 if [ -n "${CHECKPOINT_BASE:-}" ]; then
     EXTRA_FLAGS+=(--checkpoint-base="$CHECKPOINT_BASE")
+fi
+if [ -n "${WEIGHT_DECAY:-}" ]; then
+    EXTRA_FLAGS+=(--weight-decay=$WEIGHT_DECAY)
 fi
 
 # --- Map array index to (strategy, model_idx) ---
