@@ -108,6 +108,6 @@ if __name__ == "__main__":
     p.add_argument("--ensemble-sizes", type=int, nargs="+", default=[2, 3, 4, 5])
     p.add_argument("--steps-per-epoch", type=int, default=38)
     p.add_argument("--num-epochs", type=int, default=20)
-    p.add_argument("--out", default="experiments/analysis/compare_width_vs_ensemble.png")
+    p.add_argument("--out", default="experiments/figures/02_ensemble_scaling/compare_width_vs_ensemble.png")
     args = p.parse_args()
     plot_compare(args)

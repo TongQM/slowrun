@@ -17,7 +17,7 @@ Usage:
   python experiments/analysis/plot_fulldata_indiv_ens.py \
       --grid-tag fulldata_20260528_150057 \
       --strategy init_shuffle_ens \
-      --out experiments/analysis/fulldata_indiv_ens_shuffle.png
+      --out experiments/figures/01_overfit_demos/fulldata_indiv_ens_shuffle.png
 """
 import argparse
 import glob
@@ -128,7 +128,7 @@ def main():
     ap.add_argument("--grid-tag", default="fulldata_20260528_150057")
     ap.add_argument("--strategy", choices=[STRAT_TASK0, STRAT_TASK1],
                     default=STRAT_TASK1)
-    ap.add_argument("--out", default="experiments/analysis/fulldata_indiv_ens.png")
+    ap.add_argument("--out", default="experiments/figures/01_overfit_demos/fulldata_indiv_ens.png")
     args = ap.parse_args()
 
     strat_idx = 0 if args.strategy == STRAT_TASK0 else 1

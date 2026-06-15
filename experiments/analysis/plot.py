@@ -953,7 +953,7 @@ def main():
                         help="Number of individual models per strategy to plot")
     p_grid.add_argument("--data-fraction", default="0.2",
                         help="Used to construct wandb group name")
-    p_grid.add_argument("--out", default="experiments/analysis/grid_combo.png")
+    p_grid.add_argument("--out", default="experiments/figures/03_compute_matched/grid_combo.png")
     p_grid.set_defaults(fn=plot_grid)
 
     # ---- slice: vary one (or more) axes, hold the rest fixed ----
@@ -1006,7 +1006,7 @@ def main():
     p_q1.add_argument("--depth", type=int, default=12)
     p_q1.add_argument("--width", type=int, default=768)
     p_q1.add_argument("--dfs", nargs="+", default=["0.2", "0.4", "0.6", "0.8"])
-    p_q1.add_argument("--out", default="experiments/analysis/q1_data_size.png")
+    p_q1.add_argument("--out", default="experiments/figures/05_data_size/q1_data_size.png")
     p_q1.add_argument("--ymin", type=float, default=None)
     p_q1.add_argument("--ymax", type=float, default=None)
     p_q1.add_argument("--strategies", nargs="+",
