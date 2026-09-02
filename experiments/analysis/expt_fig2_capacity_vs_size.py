@@ -120,7 +120,7 @@ def tuned_wd_series() -> dict[int, tuple[float, float]]:
         wd = min(per_wd, key=per_wd.get)
         out[12] = (per_wd[wd], wd)
     # wdsize probe cells
-    for depth in (6, 18, 24, 48, 60):
+    for depth in (6, 12, 18, 24, 48, 60):
         per_wd = {}
         for f in glob.glob(str(LOGS / WDTUNED_GLOB.format(L=depth))):
             m = re.search(rf"wdsize_d{depth}_w768_wd([\d.]+)_", Path(f).name)
@@ -130,6 +130,8 @@ def tuned_wd_series() -> dict[int, tuple[float, float]]:
             if L is not None:
                 wd = float(m.group(1))
                 per_wd[wd] = min(per_wd.get(wd, np.inf), L)
+        if depth in out:          # d12: merge the fills into the base sweep
+            per_wd.setdefault(out[depth][1], out[depth][0])
         if per_wd:
             wd = min(per_wd, key=per_wd.get)
             out[depth] = (per_wd[wd], wd)
