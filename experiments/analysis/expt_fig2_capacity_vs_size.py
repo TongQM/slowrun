@@ -203,7 +203,7 @@ def main() -> None:
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$   ($E=1$)")
     ax.set_title(f"Model capacity at $df=1.0$ (100M tokens), width $N={WIDTH}$",
                  fontsize=17)
-    ax.legend(frameon=True, loc="lower left")
+    ax.legend(frameon=True, loc="center right", fontsize=15)
     fig.tight_layout()
 
     OUTDIR.mkdir(parents=True, exist_ok=True)
