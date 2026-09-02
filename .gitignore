@@ -11,6 +11,7 @@ experiments/logs/
 data_eff/
 olmo-tacc-completeP/
 LLM-width-depth-scaling-OLMo/
+experiments/analysis/data/
 .DS_Store
 data_export/
 data_export.zip

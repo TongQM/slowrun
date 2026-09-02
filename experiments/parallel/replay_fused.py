@@ -61,6 +61,15 @@ def main():
     p.add_argument("--device-batch-size", type=int, default=2)
     p.add_argument("--start-epoch", type=int, default=1)
     p.add_argument("--end-epoch", type=int, default=None)
+    p.add_argument("--eval-mode", default="epoch", choices=["epoch", "step", "both"],
+                   help="Which checkpoints define the ensemble eval grid: "
+                        "'epoch' = per-epoch ckpts (~100M-token resolution, default); "
+                        "'step' = per-step ckpts model_i_step_S.pt (~20M resolution); "
+                        "'both' = union of the two grids.")
+    p.add_argument("--start-step", type=int, default=0,
+                   help="In step/both mode, only evaluate step ckpts with S >= this. "
+                        "Use to extend an existing 20M replay without recomputing "
+                        "already-logged steps (the export/plotter merge logs by token).")
     args = p.parse_args()
 
     if args.end_epoch is None:
@@ -125,23 +134,74 @@ def main():
     ens_eval_B = 1
     ens_eval_steps = EVAL_TOKENS // (ens_eval_B * MAX_SEQ_LEN * 1)
     tokens_per_epoch = train_config["training"].get("tokens_per_epoch")
-    print(f"[fused replay] num_models={args.num_models} sizes={sizes} "
-          f"epochs={args.start_epoch}..{args.end_epoch} eval_steps={ens_eval_steps}")
+    total_batch_size = train_config["training"].get("total_batch_size")
 
-    # results[size] = list of dicts {epoch, tokens_seen, val_loss, val_bpb}
+    # ---- Build the ensemble eval grid ----
+    # Each eval point: dict(kind, key, tokens_seen, paths[list of N ckpts]).
+    # A point is only included if the checkpoint exists for ALL num_models models
+    # (an ensemble val point is undefined otherwise).
+    import glob as _glob
+
+    def _epoch_points():
+        pts = []
+        for epoch in range(args.start_epoch, args.end_epoch + 1):
+            paths = [os.path.join(args.checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
+                     for i in range(args.num_models)]
+            missing = [p for p in paths if not os.path.exists(p)]
+            if missing:
+                print(f"[grid] epoch {epoch}: SKIP — missing {missing[:2]}"
+                      f"{'...' if len(missing) > 2 else ''}")
+                continue
+            pts.append({"kind": "epoch", "key": epoch,
+                        "tokens_seen": epoch * tokens_per_epoch, "paths": paths})
+        return pts
+
+    def _step_points():
+        # Steps available for EVERY model = intersection across the N models.
+        per_model = []
+        for i in range(args.num_models):
+            steps = set()
+            for f in _glob.glob(os.path.join(args.checkpoint_dir, f"model_{i}_step_*.pt")):
+                base = os.path.basename(f)
+                try:
+                    steps.add(int(base[len(f"model_{i}_step_"):-len(".pt")]))
+                except ValueError:
+                    pass
+            per_model.append(steps)
+        common = sorted(set.intersection(*per_model)) if per_model else []
+        common = [S for S in common if S >= args.start_step]   # extend an existing replay
+        pts = []
+        for S in common:
+            paths = [os.path.join(args.checkpoint_dir, f"model_{i}_step_{S}.pt")
+                     for i in range(args.num_models)]
+            pts.append({"kind": "step", "key": S,
+                        "tokens_seen": S * total_batch_size, "paths": paths})
+        return pts
+
+    if args.eval_mode == "epoch":
+        eval_points = _epoch_points()
+    elif args.eval_mode == "step":
+        eval_points = _step_points()
+    else:  # both — union, deduped on tokens_seen, sorted
+        seen_tok = {}
+        for pt in _epoch_points() + _step_points():
+            seen_tok.setdefault(pt["tokens_seen"], pt)
+        eval_points = [seen_tok[t] for t in sorted(seen_tok)]
+
+    print(f"[fused replay] num_models={args.num_models} sizes={sizes} "
+          f"eval_mode={args.eval_mode} n_points={len(eval_points)} "
+          f"eval_steps={ens_eval_steps}")
+
+    # results[size] = list of dicts {kind, key, epoch, tokens_seen, val_loss, val_bpb}
     results = {s: [] for s in sizes}
 
-    # ---- Iterate over per-epoch checkpoint events ----
-    for epoch in range(args.start_epoch, args.end_epoch + 1):
-        ckpt_paths = [os.path.join(args.checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
-                      for i in range(args.num_models)]
-        missing = [p for p in ckpt_paths if not os.path.exists(p)]
-        if missing:
-            print(f"[epoch {epoch}] SKIP — missing checkpoints: {missing[:3]}{'...' if len(missing)>3 else ''}")
-            continue
+    # ---- Iterate over eval-grid points ----
+    for pt in eval_points:
+        ckpt_paths = pt["paths"]
+        label = f"{pt['kind']} {pt['key']}"
 
         t0 = time.time()
-        tokens_seen = epoch * tokens_per_epoch
+        tokens_seen = pt["tokens_seen"]
 
         # Load all N models on GPU
         models = []
@@ -156,7 +216,7 @@ def main():
             models.append(m)
             del sd
         load_dt = time.time() - t0
-        print(f"[epoch {epoch}] loaded {args.num_models} models in {load_dt:.1f}s")
+        print(f"[{label}] loaded {args.num_models} models in {load_dt:.1f}s")
 
         # ---- Streaming evaluation: cumulative logit sum across models, per-batch ----
         # Per-size accumulators (all on device)
@@ -213,13 +273,17 @@ def main():
             val_loss = (total_loss[s] / total_tokens.double()).item()
             val_bpb = (total_nats[s] / (total_bytes.double() * log2)).item()
             results[s].append({
-                "epoch": epoch,
+                "kind": pt["kind"],
+                "key": pt["key"],
+                "epoch": pt["key"] if pt["kind"] == "epoch" else None,
+                "step": pt["key"] if pt["kind"] == "step" else None,
                 "tokens_seen": int(tokens_seen),
                 "val_loss": val_loss,
                 "val_bpb": val_bpb,
             })
-            print(f"[epoch {epoch} ens={s}] val_loss={val_loss:.6f} val_bpb={val_bpb:.6f}")
-        print(f"[epoch {epoch}] eval done in {eval_dt:.1f}s ({load_dt+eval_dt:.1f}s total)")
+            print(f"[{label} ens={s}] val_loss={val_loss:.6f} val_bpb={val_bpb:.6f} "
+                  f"tokens={int(tokens_seen)}")
+        print(f"[{label}] eval done in {eval_dt:.1f}s ({load_dt+eval_dt:.1f}s total)")
 
         # Free model memory before next epoch
         del models
@@ -245,15 +309,19 @@ def main():
         run.define_metric("ens/tokens_seen")
         run.define_metric("ens/*", step_metric="ens/tokens_seen")
         for entry in results[s]:
-            run.log({
+            payload = {
                 "ens/val_loss": entry["val_loss"],
                 "ens/val_bpb": entry["val_bpb"],
                 "ens/num_models": s,
-                "ens/epoch": entry["epoch"],
                 "ens/tokens_seen": entry["tokens_seen"],
-            }, commit=True)
+            }
+            if entry.get("epoch") is not None:
+                payload["ens/epoch"] = entry["epoch"]
+            if entry.get("step") is not None:
+                payload["ens/step"] = entry["step"]
+            run.log(payload, commit=True)
         run.finish()
-        print(f"  wrote {run_name} ({len(results[s])} epochs)")
+        print(f"  wrote {run_name} ({len(results[s])} points, mode={args.eval_mode})")
 
     print("Fused replay complete.")
 

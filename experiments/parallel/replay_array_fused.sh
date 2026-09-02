@@ -53,6 +53,8 @@ END_EPOCH="${END_EPOCH:-$NUM_EPOCHS}"
 ENS_SIZES_STR="${ENS_SIZES_STR:-2 5 10 15 20}"
 CHECKPOINT_BASE="${CHECKPOINT_BASE:-checkpoints}"
 ENSEMBLE_MODE="${ENSEMBLE_MODE:-logit}"
+EVAL_MODE="${EVAL_MODE:-epoch}"   # epoch=~100M res, step=~20M res, both=union
+START_STEP="${START_STEP:-0}"     # step mode: only eval ckpts with S >= this (extend an existing replay)
 
 case "$SLURM_ARRAY_TASK_ID" in
     0) STRATEGY_NAME="init_ens" ;;
@@ -66,7 +68,7 @@ RUN_PREFIX="${WANDB_GROUP}_${STRATEGY_NAME}"
 
 echo "============================================================"
 echo "Fused replay  strategy=$STRATEGY_NAME  ckpt_dir=$CKPT_DIR"
-echo "  num_models=$NUM_MODELS  ens_sizes=$ENS_SIZES_STR  epochs 1..$END_EPOCH"
+echo "  num_models=$NUM_MODELS  ens_sizes=$ENS_SIZES_STR  epochs 1..$END_EPOCH  eval_mode=$EVAL_MODE"
 echo "  wandb group=$WANDB_GROUP  run prefix=$RUN_PREFIX"
 echo "============================================================"
 
@@ -77,6 +79,8 @@ python experiments/parallel/replay_fused.py \
     --num-epochs="$NUM_EPOCHS" \
     --end-epoch="$END_EPOCH" \
     --ensemble-mode="$ENSEMBLE_MODE" \
+    --eval-mode="$EVAL_MODE" \
+    --start-step="$START_STEP" \
     --wandb-group="$WANDB_GROUP" \
     --wandb-run-name-prefix="$RUN_PREFIX"
 
