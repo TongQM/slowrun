@@ -1,18 +1,24 @@
 """Expt Fig 2, panel C — model capacity at df=1.0 (full 100M tokens).
 
 Minimum validation loss L* of a SINGLE model (E=1, no ensembling) against
-model size along the depth axis at fixed width 768, under two regularization
+model size along the depth axis at fixed width 768, under three regularization
 settings:
 
   (a) wd = 0, constant LR (no warmdown)  — the unregularized baseline used by
       the rest of the df=1.0 figures. Depths {6, 12, 18, 24, 48, 60}.
-  (b) tuned weight decay + LR cooldown   — wd swept per cell, best taken.
-      Depths {12, 24, 48}; wd_opt = {0.1, 0.2, 0.3} respectively.
+  (b) wd = 0 + cooldown  (CONTROL)       — isolates the LR-schedule effect, so
+      the (a)->(c) gap can be split into schedule vs weight decay rather than
+      being reported as one confounded number. Depths {12, 24, 48}.
+      From launch_wd0_cooldown.sh; absent from the plot until those land.
+  (c) tuned weight decay + LR cooldown   — wd swept per cell, best taken.
+      wd_opt = {0.1, 0.2, 0.3} at L = {12, 24, 48}; L in {6, 18, 60} pending
+      from launch_wd_size_fill.sh.
 
-The contrast is the point: at wd = 0 the capacity curve saturates (and turns
-up), whereas with per-size-tuned wd + cooldown it keeps descending, so "bigger
-does not help in the data-limited regime" is a statement about the
-regularization, not about capacity.
+The contrast is the point: at wd = 0 the capacity curve is nearly flat in size,
+whereas with per-size-tuned wd + cooldown it keeps descending — so "bigger does
+not help in the data-limited regime" is a statement about the regularization,
+not about capacity. Going d6 -> d60 unregularized (10x parameters) buys 0.155
+nats; tuning lambda at fixed d12 buys 0.336.
 
 Strategy note: every point here is a single member-0 run. At i = 0 the data
 seed is 42 under BOTH init and init_shuffle (train.py: `data_seed = seed if
@@ -56,10 +62,27 @@ WD0_CELLS = {
     48: "fd_gridfill_d48_w768_*_0.out",
     60: "fd_gridfill_d60_w768_*_0.out",
 }
-# (b) tuned wd + cooldown. Every wd probed per depth; we take the best.
-WDTUNED_GLOB = "wdsize_d{L}_w768_wd*_*.out"
-# the base cell's sweep uses a different job-name prefix
-WDBASE_GLOB = "wd*_train_d12_w768_*.out"
+# (b) tuned wd + cooldown, always MODEL 0 so every point is a single comparable
+#     seed (the d24/d48/fill probes only ever train model 0).
+#
+#     The d12 base-cell sweep is the awkward one: `launch_wd_sweep.sh` defaults to
+#     NO_WARMDOWN=1, and the logs record neither the flag nor the LR schedule, so
+#     the same wd was run under BOTH schedules across separate submissions:
+#         job 41363*, 41609*  -> constant LR (min at 96-99% of run, then rises)
+#         job 41431*          -> cooldown    (min at exactly 100%, tail monotone,
+#                                             end-minus-min = 0.000)
+#     At wd=0.1 that is 3.797 (constant) vs 3.573 (cooldown) — a 0.22 gap, so
+#     mixing the families silently corrupts the series. We take the cooldown
+#     family only. Array index 5 = init_shuffle, model 0 (index = strat*5 + model).
+WDTUNED_GLOB = "wdsize_d{L}_w768_wd*_*_0*.out"
+WDBASE_COOLDOWN_JOBS = "41431"
+WDBASE_GLOB = f"wd*_train_d12_w768_{WDBASE_COOLDOWN_JOBS}*_5*.out"
+
+# (c) CONTROL: lambda = 0 WITH cooldown (launch_wd0_cooldown.sh). Isolates the
+#     LR-schedule effect from the weight-decay effect, which series (a) vs (b)
+#     otherwise conflate. Populates as those jobs land; the figure simply omits
+#     the series while it is empty.
+WD0CD_CELLS = {L: f"wd0cd_d{L}_w768_wd0.0_*_0*.out" for L in (12, 24, 48)}
 
 
 def min_val(pattern: str) -> float | None:
@@ -97,7 +120,7 @@ def tuned_wd_series() -> dict[int, tuple[float, float]]:
         wd = min(per_wd, key=per_wd.get)
         out[12] = (per_wd[wd], wd)
     # wdsize probe cells
-    for depth in (24, 48):
+    for depth in (6, 18, 24, 48, 60):
         per_wd = {}
         for f in glob.glob(str(LOGS / WDTUNED_GLOB.format(L=depth))):
             m = re.search(rf"wdsize_d{depth}_w768_wd([\d.]+)_", Path(f).name)
@@ -121,10 +144,11 @@ def params_m(depth: int, width: int = WIDTH) -> float:
 def main() -> None:
     wd0 = {d: v for d, v in ((d, min_val(p)) for d, p in WD0_CELLS.items()) if v is not None}
     tuned = tuned_wd_series()
+    wd0cd = {d: v for d, v in ((d, min_val(p)) for d, p in WD0CD_CELLS.items()) if v is not None}
 
     sns.set(font_scale=1.5)
     sns.set_style("whitegrid")
-    sns.set_palette("cool", 2)
+    sns.set_palette("cool", 3)
     plt.rcParams["axes.labelsize"] = 24
     plt.rcParams["axes.linewidth"] = 4.0
     plt.rcParams["legend.fontsize"] = 18
@@ -141,6 +165,11 @@ def main() -> None:
     for d, x, y in zip(ds, xs, ys):
         ax.annotate(f"$L$={d}", (x, y), textcoords="offset points",
                     xytext=(0, 11), ha="center", fontsize=13)
+
+    if wd0cd:
+        dc = sorted(wd0cd)
+        ax.plot([params_m(d) for d in dc], [wd0cd[d] for d in dc], "^--", lw=2.5,
+                ms=11, label=r"$\lambda = 0$ + cooldown  (control)")
 
     dt = sorted(tuned)
     xt = [params_m(d) for d in dt]
@@ -188,6 +217,8 @@ def main() -> None:
         fh.write("series,depth,width,params_m,weight_decay,lr_schedule,min_val_loss\n")
         for d in ds:
             fh.write(f"wd0,{d},{WIDTH},{params_m(d):.2f},0,constant,{wd0[d]:.4f}\n")
+        for d in sorted(wd0cd):
+            fh.write(f"wd0_cooldown,{d},{WIDTH},{params_m(d):.2f},0,cooldown,{wd0cd[d]:.4f}\n")
         for d in dt:
             L, wd = tuned[d]
             fh.write(f"tuned_wd,{d},{WIDTH},{params_m(d):.2f},{wd:g},cooldown,{L:.4f}\n")
@@ -196,6 +227,10 @@ def main() -> None:
     print("\nwd=0, constant LR:")
     for d in ds:
         print(f"  d{d:<3} N={params_m(d):8.1f}M  L*={wd0[d]:.4f}")
+    if wd0cd:
+        print("wd=0 + cooldown (control):")
+        for d in sorted(wd0cd):
+            print(f"  d{d:<3} N={params_m(d):8.1f}M  L*={wd0cd[d]:.4f}")
     print("tuned wd + cooldown:")
     for d in dt:
         print(f"  d{d:<3} N={params_m(d):8.1f}M  L*={tuned[d][0]:.4f}  (wd={tuned[d][1]:g})")
