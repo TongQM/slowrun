@@ -5,6 +5,8 @@ wd0,18,768,169.87,0,constant,3.8967
 wd0,24,768,226.49,0,constant,3.8728
 wd0,48,768,452.98,0,constant,3.8257
 wd0,60,768,566.23,0,constant,3.8182
+wd0_cooldown,12,768,113.25,0,cooldown,3.9012
+tuned_wd,6,768,56.62,0.1,cooldown,3.6285
 tuned_wd,12,768,113.25,0.1,cooldown,3.5733
 tuned_wd,24,768,226.49,0.2,cooldown,3.4956
 tuned_wd,48,768,452.98,0.3,cooldown,3.4667

@@ -72,6 +72,16 @@ declare -a HEADS=( 12         12         12)
 declare -a TIMES=("08:00:00" "14:00:00" "30:00:00")
 declare -a WDLIST=("0.0 0.05 0.1" "0.1 0.15 0.2" "0.3 0.4 0.5")
 
+# Override for follow-up probes, e.g. resolving an optimum that landed on a grid
+# boundary:  LAYERS_CSV=6 TIMES_CSV=08:00:00 WDLIST_CSV="0.15 0.2" bash ...
+if [ -n "${LAYERS_CSV:-}" ]; then
+    IFS=',' read -ra LAYERS <<< "$LAYERS_CSV"
+    IFS=',' read -ra TIMES  <<< "${TIMES_CSV:?TIMES_CSV required with LAYERS_CSV}"
+    IFS='|' read -ra WDLIST <<< "${WDLIST_CSV:?WDLIST_CSV required with LAYERS_CSV}"
+    EMBDS=(); HEADS=()
+    for _ in "${LAYERS[@]}"; do EMBDS+=(768); HEADS+=(12); done
+fi
+
 echo "============================================================"
 echo "P1-FILL  GRID_TAG=$GRID_TAG  account=$ACCOUNT"
 echo "  ckpt_base=$CKPT_BASE"
