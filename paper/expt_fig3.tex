@@ -1,0 +1,126 @@
+% =====================================================================
+% Expt Fig 3: 4 x 4 (depth x width) grid at df = 0.2.
+% Ensembling vs model-size scaling, denoising rate, and the joint
+% scaling-law fit on all five identifiable structural exponents.
+% =====================================================================
+
+
+% --- 3.1: 4x4 grid val curves, both strategies ---
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\linewidth]{experiments/figures/03_compute_matched/expt_fig3_1_grid_both_strats.pdf}
+\caption{Validation loss vs cumulative tokens for all 16 cells of the $4 \times 4$ depth $\times$ width grid at $df = 0.2$, stacked by ensembling strategy. Top half: \emph{init} (shared per-epoch data ordering across members). Bottom half: \emph{init plus shuffle} (independent per-epoch data orderings per member). Within each half, rows index depth $L \in \{6, 12, 18, 24\}$ and columns index width $N \in \{384, 768, 1152, 1536\}$. Per panel: 5 individuals (gray, $\alpha = 0.5$) and the post-hoc replay ensembles at $E \in \{2, 3, 4, 5\}$ (cool palette). Faint vertical dashed lines mark each of the 25 epoch boundaries (20M tokens per epoch).}
+\label{fig:grid_both_strats}
+\end{figure}
+
+\paragraph{Notes on Figure~\ref{fig:grid_both_strats}.}
+All cells use the same setup: 25 epochs at $df = 0.2$ on a 100M-token FineWeb subset, trapezoidal LR with linear warmdown, weight decay $0.1$, CompleteP, no value-embedding projections.
+The $4 \times 4$ grid combines the original 9-cell sweep ($L \in \{6, 12, 24\}$ $\times$ $N \in \{384, 768, 1536\}$) with the interpolated extension that adds the $L = 18$ row and the $N = 1152$ column.
+Y-axis is clamped to $[4.0, 6.6]$ across all 32 panels so that the U-curves remain readable; the very-early descent above $6.6$ nats is clipped.
+The U-curve becomes more pronounced toward the bottom-right of each block (deeper plus wider models), where the post-overfit climb is steeper and the nadir is reached earlier in tokens.
+Comparing the top and bottom halves cell-by-cell, init plus shuffle visibly dampens the post-overfit climb at every cell, with the gap widening as $E$ grows --- consistent with Figure~\ref{fig:ensemble_scaling}'s strategy-difference finding generalizing across the grid.
+
+
+% --- 3.2: min-val heatmap ---
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\linewidth]{experiments/figures/03_compute_matched/expt_fig3_2_min_val_heatmap.pdf}
+\caption{Best validation loss reached during 25 epochs across the $4 \times 4$ grid, per ensemble size $E \in \{1, 2, 3, 4, 5\}$ (columns) and per strategy (rows). Color scale shared across all 10 panels (\texttt{magma}: dark $=$ low loss, bright $=$ high loss). $E = 1$ is the mean across the 5 individuals of each individual's per-run minimum.}
+\label{fig:min_val_heatmap}
+\end{figure}
+
+\paragraph{Notes on Figure~\ref{fig:min_val_heatmap}.}
+At $E = 1$, the entire $4 \times 4$ grid sits in $[4.45, 4.56]$ --- almost flat across a $24 \times$ range in non-embedding parameters.
+By $E = 5$ the same grid drops to $[4.17, 4.31]$.
+The optimal cell shifts with $E$: at $E = 1$ the smallest non-degenerate cell ($d{=}12, w{=}384$) wins; at $E = 5$ the optimum sits in the middle ($d{=}12, w{=}768$ for both strategies).
+Init plus shuffle dominates init at every $(d, w, E \geq 2)$ tuple, typically by $0.01$--$0.03$ nats, with the gap widening at higher $E$.
+
+\paragraph{Bias-variance balance under fixed data.}
+The U-shape of the min-loss surface in $(N, L)$ at fixed $E$ is the central qualitative finding of Expt~3.
+In the proposed scaling law, the parameter-driven bias term $(N^2 L)^{-r_{\mathrm{param}}}$ \emph{decreases} with model size, while the variance-buildup term $E^{-\delta_E} N^{\delta_N} L^{\delta_L} (s/T)^\delta$ \emph{increases} with model size.
+With $df = 0.2$ held fixed (so $P^{-r_P}$ is constant), bigger models pay a larger variance-buildup penalty per ensemble member; ensembling at finite $E$ cannot fully neutralize that growth, so the optimal cell at any fixed $E$ sits at the size where the two terms balance.
+Concretely: at $E = 1$ the parameter term has saturated against the data ceiling and additional capacity only buys overfit; at $E = 5$ the variance-buildup floor is partly relaxed but still nonzero, so the medium cell still wins.
+This bias-variance balance also explains why the absolute spread of min-val-loss across the grid (a $0.1$-nat band at every $E$) is so much smaller than would be expected from a Chinchilla-style single-pass extrapolation: the parameter term and the variance-buildup term cancel each other across the grid.
+
+
+% --- 3.3: compute-matched ---
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\linewidth]{experiments/figures/03_compute_matched/expt_fig3_3_compute_matched.pdf}
+\caption{Compute-matched ensembling versus single-model scaling. Rows: vary width at fixed depth $d{=}12$ (top) / vary depth at fixed width $w{=}768$ (bottom). Columns: \emph{init} / \emph{init plus shuffle}. Cyan circles trace the single-model scaling line ($E = 1$, varying $N$ or $L$); magenta squares trace the ensemble-at-base line ($d{=}12, w{=}768$, varying $E$). Compute is taken proportional to non-embedding parameters $16\,L N^2$, multiplied by $E$ for ensembles, normalized to the $d{=}12, w{=}768, E{=}1$ baseline. Vertical dotted lines mark $4 \times$ matched compute.}
+\label{fig:compute_matched}
+\end{figure}
+
+\paragraph{Notes on Figure~\ref{fig:compute_matched}.}
+The plotted $y$ value is the minimum validation loss attained over the 25-epoch run --- mean across the 5 individuals for the single-model points, per-run min of the fused replay for the ensemble points.
+The width-axis scale-model line spans $\{0.25, 1, 2.25, 4\} \times$ compute (widths $\{384, 768, 1152, 1536\}$); the depth-axis line spans $\{0.5, 1, 1.5, 2\} \times$ compute (depths $\{6, 12, 18, 24\}$); the ensemble-at-base line spans $\{1, 2, 3, 4, 5\} \times$ compute.
+At the headline $4 \times$ compute point, single-model scaling reaches a min val loss of $4.524$ (init) and $4.514$ (init plus shuffle); ensembling at base ($E = 4$) reaches $4.226$ and $4.203$ respectively, a $\Delta = 0.30$ and $\Delta = 0.31$ nat advantage to ensembling.
+
+% --- 3.3 body ---
+
+The non-monotonicity of $L(t)$ in Figure~\ref{fig:overfit_u_curve} and the power-law $E$-dependence in Figure~\ref{fig:ensemble_scaling} together imply that ensembling at the base size and scaling up a single model are both ways to spend extra compute past the overfit-onset epoch.
+Figure~\ref{fig:compute_matched} compares them directly at matched compute and yields the central operational claim of Expt~3: \textbf{at $4\times$ matched compute, ensembling beats single-model scaling by $0.30$--$0.31$ nats, both for width-scaling and (extrapolated) for depth-scaling, in both ensemble strategies}.
+Even more striking, the cyan single-model lines are essentially flat or \emph{slightly increasing} in compute --- spending compute on width or depth in this regime does not lower the floor at all, while the same compute spent on members drops the floor monotonically.
+The depth axis only reaches $2 \times$ compute (we have $L \leq 24$), but the same direction holds: at $2 \times$ compute, an $E = 2$ ensemble at base size already beats any single deeper model in the grid, and the gap widens at $E \in \{3, 4, 5\}$.
+This is the cleanest empirical statement of the bias-variance balance described above: the parameter term has saturated against the data-limited floor, so the variance-buildup term is the only one ensembling actually fights, and it is the only compute channel that still buys real loss reduction.
+
+
+% --- 3.4: per-cell b heatmap ---
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{experiments/figures/03_compute_matched/expt_fig3_4_b_heatmap.pdf}
+\caption{Per-cell ensemble exponent $b$ across the $4 \times 4$ grid, fitted as $L_{T, E} = a_T E^{-b} + L_{\infty, T}$ with shared $b$ per cell, per-snapshot $a_T$ and $L_{\infty, T}$. Two heatmaps: \emph{init} (left) and \emph{init plus shuffle} (right). Diverging color scale centered at $b = 1$ (\texttt{RdBu\_r}: red $=$ $b > 1$, blue $=$ $b < 1$). Each cell annotated with $b \pm \mathrm{SE}$.}
+\label{fig:b_heatmap}
+\end{figure}
+
+\paragraph{Notes on Figure~\ref{fig:b_heatmap}.}
+Per-cell fit: $E \in \{1, 2, 3, 4, 5\}$ where $E = 1$ is the per-snapshot mean across the 5 individuals; 25 epoch snapshots per cell; jointly fit one $b$ plus $25$ $a_T$'s plus $25$ $L_{\infty, T}$'s ($51$ free params, $125$ obs, $74$ dof per cell).
+Inverse-variance-weighted grid means are $\bar{b} = 1.09 \pm 0.01$ for init and $\bar{b} = 1.05 \pm 0.01$ for init plus shuffle.
+Both reject the strict $\bar{b} = 1$ null at $z > 5$, but in the direction of slightly super-$1/E$ decay --- the prior of "denoising at rate $1/E$" is roughly correct on the grid, with both strategies clustered just above 1.
+Per-cell scatter is wider than in Figure~\ref{fig:ensemble_scaling} (range $[0.46, 1.41]$ here vs.\ $\sigma \approx 0.01$ on $b$ at the base cell in Expt~2) because the Expt~3 ensemble grid spans only $E \in \{1, ..., 5\}$ versus Expt~2's $E \in \{1, ..., 20\}$, leaving the slope poorly constrained per cell --- the noisiest values sit at $L = 6$ where the U-curve is shallowest and $L_{\infty, T}$ is itself poorly identified.
+At the cell shared with Expt~2 ($d{=}12, w{=}768$), this fit returns $b \approx 1.17$ (init) and $b \approx 0.80$ (init plus shuffle); Expt~2's wider $E$-range is the better source for the headline $\delta_E$.
+
+
+% --- 3.5: scaling-law fit ---
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\linewidth]{experiments/figures/03_compute_matched/expt_fig3_5_scaling_law.pdf}
+\caption{Joint fit of the proposed general scaling law to the entire 4 $\times$ 4 grid plus ensembles. (A) Predicted vs observed val loss across all 2000 observations per strategy, color $=$ depth, marker $=$ strategy. (B) Residual vs predicted, colored by $E$. (C) Example cell $d = 24, w = 1536$ (init plus shuffle) --- observed val curves at all $E$ (dots) overlaid with model predictions (solid lines).}
+\label{fig:scaling_law}
+\end{figure}
+
+\paragraph{Notes on Figure~\ref{fig:scaling_law}.}
+We fit the augmented form
+$$\mathcal{L}(s, N, L, E) \;=\; a\,(s/s_0)^{-r_t} + b\,(N^2 L / k_0)^{-r_{\mathrm{param}}} + c\, E^{-\delta_E} (N/N_0)^{\delta_N} (L/L_0)^{\delta_L} (s/T)^{\delta} + \mathcal{L}_0$$
+with reference scales $s_0 = 100$M tokens, $N_0 = 768$, $L_0 = 12$, $k_0 = N_0^2 L_0$ so the reduced variables are $\mathcal{O}(1)$ at the base cell.
+The data-limited $P^{-r_P}$ term is absorbed into $\mathcal{L}_0$ since $P$ is held fixed at $df = 0.2$; quantifying $r_P$ is deferred to Expt~4.
+We add explicit positive amplitudes $a, b, c$ in front of each non-constant term so that the structural exponents can be identified independently of the units chosen for the reduced variables.
+The fit is multi-start nonlinear least-squares on log-residuals --- $\log \mathcal{L}_{\mathrm{pred}} - \log \mathcal{L}_{\mathrm{obs}}$ --- which puts equal relative weight on each observation and lets the variance-buildup term emerge despite being dominated in absolute terms by the early-epoch bias contribution.
+Sign constraints: all amplitudes positive, $r_t, r_{\mathrm{param}}, \delta_E, \delta > 0$, and $\delta_N, \delta_L \geq 0$ (the variance-buildup term must grow with $N$ and $L$ to be identifiable as such).
+Each strategy is fit separately, with $\delta_E$ pinned at the Expt~2 estimates ($0.88$ for init, $1.09$ for init plus shuffle); free-$\delta_E$ variants are reported in the coefficient CSV.
+
+\paragraph{Fitted exponents (init plus shuffle, $\delta_E$ pinned).}
+The fit reaches $R^2 = 0.93$ and per-observation residual $\hat\sigma = 0.030$ on log-loss, with the following structural exponents:
+$r_t = 0.41 \pm 0.01$, $r_{\mathrm{param}} = 0.43 \pm 0.10$, $\delta_N = 0.99 \pm 0.04$, $\delta_L = 0.59 \pm 0.03$, $\delta = 2.00$ (upper bound), $\mathcal{L}_0 = 2.96 \pm 0.07$ nats.
+The init fit gives qualitatively identical exponents within $1\sigma$ except for $\mathcal{L}_0$, which hits the lower bound of $2.5$ nats.
+The two robustly identified exponents are $\delta_N$ and $\delta_L$: variance-buildup grows nearly linearly with width ($\delta_N \approx 1$) and roughly with the square root of depth ($\delta_L \approx 0.6$).
+
+\paragraph{Identification limits.}
+Two parameters reach their bounds in at least one of the four fit variants and should be read as conservative estimates rather than measurements.
+First, the variance-buildup epoch exponent $\delta$ saturates at the upper bound of $2.0$ in every fit; an unconstrained run prefers $\delta \approx 4$, which is mathematically equivalent to a much smaller fitted amplitude $c$ over the 1--25 epoch range we observe and reflects a degeneracy between $s^{-r_t}$ (decreasing in time) and $(s/T)^\delta$ (increasing in time) that cannot be resolved from this data window.
+The proposed conjecture $\delta = 1/2$ is \emph{not} consistent with our grid even at the lower edge of identification --- the U-curve climbs are steeper than $\delta = 1/2$ allows.
+Second, $\mathcal{L}_0$ presses against its physical lower bound in the init fit; the model wants more of the loss to live in the variance-buildup and bias-dynamics terms.
+Finally, free-$\delta_E$ variants on Expt~3 alone return $\delta_E \approx 0.55$--$0.59$ for both strategies, lower than Expt~2's $0.88$/$1.09$; this disagreement is the price of Expt~3's narrow $E$-range and is why we pin $\delta_E$ from Expt~2 in the headline fits.
+
+% --- closing body ---
+
+The general scaling law in Eq.~(1) of the introduction gathers the four contributions to the loss --- bias dynamics ($s^{-r_t}$), parameter floor ($(N^2 L)^{-r_{\mathrm{param}}}$), data-limited Bayes error ($P^{-r_P}$), and the variance-buildup term that decreases in $E$ and increases in $s, N, L$ --- into a single closed form.
+On the Expt~3 grid, $r_P$ is unidentified ($P$ is constant) and $\delta$ is degenerate with $r_t$ over the 25-epoch window, so we report $\delta_N$ and $\delta_L$ as the two clean structural findings: variance-buildup is approximately linear in width ($\delta_N \approx 1$) and grows with depth at a notably slower rate ($\delta_L \approx 0.6$).
+The depth-vs-width asymmetry is consistent with the qualitative compute-matched result: scaling depth past $L = 12$ at $w = 768$ does \emph{less} damage than scaling width past $w = 768$ at $L = 12$, because the variance-buildup penalty per added parameter is smaller along the depth axis.
+The clean per-strategy $\delta_E$ values from Figure~\ref{fig:ensemble_scaling} (a one-cell, $E$-resolved fit at the base cell with $E$ up to $20$) bracket the theoretical conjecture $\delta_E = 1$, and pinning them as priors lets the Expt~3 grid identify $\delta_N, \delta_L, r_t, r_{\mathrm{param}}, \mathcal{L}_0$ jointly with no remaining strategy ambiguity.
+The remaining open question --- whether $\delta = 1/2$ holds at all once we observe more epochs, or whether the variance-buildup term truly grows super-linearly in $s/T$ --- requires longer training or wider $df$ variation, which Expt~4 begins to provide.

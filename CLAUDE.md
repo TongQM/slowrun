@@ -30,6 +30,40 @@ These are baked into every launcher in this repo and apply to every new run unle
 
 **Wandb x-axis convention:** all curves use cumulative `tokens_seen` (per-model, including multi-epoch repeats), set as `step_metric` for both `model_{i}/*` and `ens/*`. Not optimizer step. This makes plots directly readable as "how does val loss evolve as each model re-reads the fixed dataset" — the central question of the project.
 
+**Plot styling convention.** Standard setup at the top of any plotting function (executive decision; project-wide default):
+
+```python
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.set(font_scale=1.5)
+sns.set_style('whitegrid')
+sns.set_palette('cool', len(num_lines))   # default — pick palette size up-front
+
+plt.rcParams['axes.labelsize']  = 24
+plt.rcParams['axes.linewidth']  = 4.0      # thick bounding box
+plt.rcParams['legend.fontsize'] = 18
+plt.rcParams['grid.alpha']      = 0.25
+plt.rcParams['xtick.labelsize'] = 20
+plt.rcParams['ytick.labelsize'] = 20
+```
+
+Plot defaults:
+- **Palette: `cool`** (sequential, perceptually uniform). Alt: `rocket` for warm-sequential, `magma` for high-contrast. Don't mix palettes within one figure.
+- **Linewidth: thick (`lw=3.0` for primary lines; `lw=2.5` for reference dashed lines).** Helps multi-panel readability.
+- **Save format: PDF for paper, save with `bbox_inches='tight'` and `dpi=300`** (high DPI matters when journal rasterizes).
+- **Axis labels: `fontsize=28` for math notation; default `axes.labelsize=24` otherwise.**
+- **Bands for std/CI**: `plt.fill_between(..., color=f'C{i}', alpha=0.1)` matching the line color.
+
+Example (per-line band + dashed reference fit):
+```python
+for i, line in enumerate(lines):
+    plt.loglog(xs, line, label=f'N = {N[i]}', lw=3.0)
+    plt.fill_between(xs, line - std[i], line + std[i], color=f'C{i}', alpha=0.1)
+    plt.loglog(xs, fit[i], '--', color='black', lw=2.5)
+plt.savefig('fig.pdf', bbox_inches='tight', dpi=300)
+```
+
 ## Experiment Setup
 
 ### Primary Script
@@ -43,14 +77,18 @@ Distillation is removed in our fork — models are fully independent. Checkpoint
 
 **(b) Parallel SLURM + post-hoc replay** — `experiments/parallel/launch.sh`. Submits a 40-task training array via `train_array.sh` (20 models × 2 ensemble strategies, each task trains ONE model via `--single-model-idx`) into a shared checkpoint dir keyed by `SHARED_TIMESTAMP`. Training jobs skip themselves if their final checkpoint already exists, and now also **resume from the last per-epoch checkpoint** when partial progress is on disk — safe to resubmit at any time. A 10-task replay array (`replay_array.sh` → `replay.py`) runs with `--dependency=afterok`, looping over ensemble sizes `{2, 4, 8, 16, 20}` per strategy — each replay loads the first-N checkpoints at each epoch and logs **only ensemble** val loss (`SKIP_INDIV_VAL=1` by default — per-model val is already on wandb from training).
 
-**(c) Grid v2: 9-cell scan with train → replay → cleanup chain** — `experiments/parallel/launch_grid_v2.sh`. The current production pipeline. Iterates over 9 (depth × width) cells smallest-to-largest, and for each cell submits three SLURM arrays gated by `--dependency=afterok`:
+**(c) Grid v2: cell-by-cell scan with train → replay → cleanup chain** — `experiments/parallel/launch_grid_v2.sh`. The current production pipeline. Iterates over its 9 hardcoded (depth × width) cells smallest-to-largest, and for each cell submits three SLURM arrays gated by `--dependency=afterok`:
 1. **train_array** (5 models × 2 strategies = 10 tasks)
 2. **replay_array** (4 ensemble sizes × 2 strategies = 8 tasks) — depends on train completion
 3. **cleanup_array** (2 tasks: 1 per strategy) — depends on replay; deletes transient mid-epoch checkpoints, keeps only "permanent" ones (every Nth save)
 
 The next cell's training waits for the previous cell's cleanup, so transient checkpoints from one cell are reclaimed before the next cell's transients pile up. Both strategies of one cell run in parallel by default; large cells (e.g. d24/w1536) override to sequential strategies because their per-strategy transient already exceeds any single allocation.
 
-**Picking a path:** use (a) for quick iteration on a single small cell; (b) for a single-cell parallel sweep with one set of replay sizes; (c) (= what we use now) for the 9-cell grid.
+**(c′) df=0.2 grid extension** — `experiments/parallel/launch_df02_extension.sh`. Same three-array chain as (c), but for the 7 cells that turn the 3×3 core into the **4×4 headline grid**: the d18 row (`d18/{w384, w768, w1152, w1536}`) and the w1152 column (`{d6, d12, d18, d24}/w1152`, sharing d18/w1152). Deliberately aligned to the *core's* schedule, i.e. WARMUP=0 + flat 80% + linear warmdown — **not** the `--no-warmdown` project default — so the new cells are directly comparable to `grid_20260430_152533`. Per-epoch ckpts only (no step ckpts), replay sizes `{2,3,4,5}`, cleanup keeps every 5th epoch.
+
+**The shipped df=0.2 grid is therefore 4×4**: depths `{6, 12, 18, 24}` × widths `{384, 768, 1152, 1536}`, both strategies, 5 individuals per cell. That is the shape `experiments/analysis/expt_fig3_loader.py` and `data_export/expt3_grid/` expect (16 cells × 2 strategies × 5 individuals = 160 individual files; × 4 ensemble sizes = 128 ensemble files). The 3×3 cell table inside `launch_grid_v2.sh` describes only the core pass.
+
+**Picking a path:** use (a) for quick iteration on a single small cell; (b) for a single-cell parallel sweep with one set of replay sizes; (c) for a fresh grid; (c′) to extend an existing grid with new rows/columns on the original grid's schedule.
 
 **Tunables for paths (b) and (c)** — all configurable via env vars:
 - `GPU_SPEC` (default `h100-80:1`): always H100 in this project
@@ -106,9 +144,9 @@ bash experiments/parallel/launch.sh
 SHARED_TIMESTAMP=<TS> bash experiments/parallel/launch.sh
 ```
 
-**Path (c) — 9-cell grid sweep (current production)**:
+**Path (c) — grid sweep (current production)**:
 ```bash
-# Submit all 9 cells smallest-to-largest, each as a train→replay→cleanup chain
+# Submit all 9 core cells smallest-to-largest, each as a train→replay→cleanup chain
 bash experiments/parallel/launch_grid_v2.sh
 
 # Smoke-test just the smallest cell first
@@ -123,6 +161,25 @@ DRY_RUN=1 bash experiments/parallel/launch_grid_v2.sh
 - Wandb groups: `grid_<GRID_TAG>_d{6,12,24}_w{384,768,1536}_df<f>` — one group per cell, all share `GRID_TAG`.
 - Per-cell config table is hardcoded in `launch_grid_v2.sh` (size, destination, cadence, permanent stride). Edit it there for new grids (e.g. df=0.2 vs df=0.4).
 
+**Path (c′) — extend the df=0.2 grid to 4×4** (d18 row + w1152 column, 7 cells, ~630 SU):
+```bash
+bash experiments/parallel/launch_df02_extension.sh
+
+# subset the cell loop (1–7) / resume / dry run — same env-var interface as (c)
+START_CELL=4 bash experiments/parallel/launch_df02_extension.sh
+DRY_RUN=1    bash experiments/parallel/launch_df02_extension.sh
+```
+
+**Single-question sweeps** (each hardcodes its own cell + schedule; read the header comment first):
+```bash
+# Q1: data-size ablation at d12/w768, wd=0, fixed ~1B-token budget across dfs
+bash experiments/parallel/launch_q1_data_size_sweep.sh
+
+# Q2: ensemble-size sweep to E=20 at d12/w768 df=0.2, constant LR, 20 individuals × 2 strategies
+bash experiments/parallel/launch_q2_ensemble_size_sweep.sh
+```
+Q2's replays use the **fused** path — `replay_fused.py` (`replay_array_fused.sh`) does one forward pass per (model, eval-point) and scores every ensemble size from it, instead of `replay.py`'s one pass per (model, size, eval-point). `replay_bootstrap.py` (`replay_bootstrap.sh`) is the membership-variance variant: resamples the 20-model pool with replacement per iteration and recomputes ensemble L, giving the error bands in Expt 2.
+
 **Orchestrator** (multi-size sweeps, drives path (a)):
 ```bash
 python experiments/sync/sweep.py \
@@ -131,7 +188,17 @@ python experiments/sync/sweep.py \
     --launch-prefix "torchrun --standalone --nproc_per_node=2"
 ```
 
-**Plot** ensemble val curves from a finished run:
+**Paper figures** — regenerate offline from the exports (no cluster, no wandb; needs
+numpy/matplotlib/seaborn/scipy only). Each script writes its own `experiments/figures/NN_topic/`:
+```bash
+python experiments/analysis/expt_fig2_ensemble_scaling.py
+python experiments/analysis/expt_fig3_1_grid_curves.py
+
+# rebuild data_export/ + manifest.csv from wandb and train logs (needs wandb access)
+python experiments/analysis/assemble_data.py
+```
+
+**Live wandb plots** from a finished run (legacy path, predates `data_export/`):
 ```bash
 # Per-model + single ensemble curve per strategy
 python experiments/analysis/plot.py single \
@@ -222,23 +289,53 @@ experiments/           # our orchestration, replay, and analysis (the focus)
 ├── sync/              # path (a): synchronized in-process ensemble
 │   ├── run.sh         # 2-task SLURM array (init / init+shuffle)
 │   └── sweep.py       # multi-size, multi-ensemble orchestrator
-├── parallel/          # paths (b) and (c): parallel single-model + ensemble-size-sweep replay
-│   ├── launch.sh         # path (b): submits training + replay arrays for ONE cell
-│   ├── launch_grid_v2.sh # path (c): orchestrates 9-cell grid sweep with train→replay→cleanup chains
+├── parallel/          # paths (b), (c), (c′): parallel single-model training + replay
+│   ├── launch.sh                  # path (b): submits training + replay arrays for ONE cell
+│   ├── launch_grid_v2.sh          # path (c): 9-cell core grid, train→replay→cleanup chain per cell
+│   ├── launch_df02_extension.sh   # path (c′): d18 row + w1152 column → 4×4 df=0.2 grid (warmdown LR)
+│   ├── launch_grid.sh             # superseded v1 grid launcher (no cleanup stage); kept for reference
+│   ├── launch_grid_v2_waves.sh    # wave-parallel variant of (c) for the cancelled df=0.4 cells 4–9
+│   ├── launch_q1_data_size_sweep.sh    # Q1: data-fraction ablation, wd=0, fixed ~1B-token budget
+│   ├── launch_q2_ensemble_size_sweep.sh # Q2: 20 individuals × 2 strategies for E up to 20
 │   ├── train_array.sh    # training array (5 models × 2 strategies = 10 tasks/cell); skips done, resumes partial
 │   ├── replay_array.sh   # replay array (4 ensemble sizes × 2 strategies = 8 tasks/cell)
 │   ├── replay.py         # post-hoc ensemble eval; enumerates BOTH per-epoch and per-step ckpts, computes ensemble val at every distinct token-count point
+│   ├── replay_fused.py / replay_array_fused.sh   # one forward pass per (model, eval-point), scores ALL sizes from it
+│   ├── replay_bootstrap.py / replay_bootstrap.sh # resamples the model pool with replacement → membership-variance bands
 │   └── cleanup_array.sh  # per-(cell, strategy) cleanup: deletes step ckpts not on the permanent stride; keeps every-100M-token ckpts
-├── analysis/          # plots and notebooks
-│   └── plot.py
+├── analysis/          # offline figure scripts — read data_export/, no wandb dependency
+│   ├── expt_fig<N>_*.py       # one script per paper figure; see "Figure pipeline" below
+│   ├── expt_fig<N>_loader.py  # shared per-figure-family loader (fig3 = the 4×4 grid, fig4 = data-size)
+│   ├── assemble_data.py       # builds data_export/ (+ manifest.csv) from wandb and train logs
+│   └── plot.py                # legacy live wandb plotting (single-run / ensemble-size sweep)
+├── diagnostic/        # CompleteP correctness check: 8 single-model jobs spanning width & depth from d12_w768
+├── figures/           # canonical figure outputs, numbered by topic (NN_slug/); 00_archive/ holds superseded ones
 ├── logs/              # SLURM stdout/stderr (gitignored)
 └── README.md          # authoritative spec of our diffs to unlimited/train.py
+data_export/           # tidy NPZ curves for offline analysis (untracked); README.md + schema.md + manifest.csv
+paper/expt_fig<N>.tex  # manuscript figure blocks; each opens with a comment naming its source figure path
 prepare_data.py        # FineWeb tokenization (shared)
 legacy/                # upstream benchmark tracks — not the research focus
 ├── limited_train.py   # 1-hour single-model track
 ├── tiny/              # 15-min track
 └── dev/               # upstream experimental attention variants
 ```
+
+### Figure pipeline
+
+```
+data_export/<exptN>/**.npz → experiments/analysis/expt_fig<N>_<slug>.py
+  → experiments/figures/NN_topic/*.{pdf,png}[, *_fits.csv] → paper/expt_fig<N>.tex
+```
+
+- One script per figure; anything shared across a figure family goes in `expt_fig<N>_loader.py`.
+- Emit **both** `.pdf` and `.png`, plus a `*_fits.csv` whenever the figure reports fitted parameters.
+- Superseded figures move to `experiments/figures/00_archive/` — they are not deleted.
+- Keep the source-path comment at the top of each `paper/expt_fig<N>.tex` accurate; it is the only
+  link back from the manuscript to the code that produced the figure.
+- Analysis scripts resolve paths via `REPO = Path(__file__).resolve().parents[2]`, so they run from
+  anywhere and always write into this repo. They need only numpy/matplotlib/seaborn/scipy — no GPU,
+  no wandb — so every paper figure is reproducible offline from a laptop checkout.
 
 ### Architecture (GPT in `unlimited/train.py`)
 - Default config: d12, n_embd=768, n_head=12 (~166M params). Larger configs supported via CLI.

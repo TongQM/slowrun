@@ -42,6 +42,11 @@ fi
 mkdir -p experiments/logs
 export PYTHONUNBUFFERED=1
 
+# Defensive against H100-compute-node outbound networking blips
+# (started failing 2026-05-04; see train_array.sh notes).
+export TIKTOKEN_CACHE_DIR=/ocean/projects/cis260161p/ymiao6/.tiktoken_cache
+export WANDB_MODE="${WANDB_MODE:-offline}"
+
 NUM_MODELS="${NUM_MODELS:-20}"
 NUM_EPOCHS="${NUM_EPOCHS:-25}"
 END_EPOCH="${END_EPOCH:-$NUM_EPOCHS}"

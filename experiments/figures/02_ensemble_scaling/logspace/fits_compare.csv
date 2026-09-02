@@ -1,0 +1,7 @@
+fit,strategy,b,b_se,p_aT,p_aT_se,sigma
+linear,init_ens,0.74797,0.01338,0.68121,0.01153,0.0074674
+linear,init_shuffle_ens,1.14646,0.02709,0.65337,0.02608,0.0074674
+log_fix,init_ens,0.84115,0.15595,1.30078,0.12207,1.8406
+log_fix,init_shuffle_ens,1.46223,0.15851,0.68886,0.18166,1.8406
+log_full,init_ens,0.44488,0.02334,0.47724,0.01479,0.14655
+log_full,init_shuffle_ens,0.64380,0.03971,0.36100,0.03064,0.14655
