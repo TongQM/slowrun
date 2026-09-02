@@ -36,7 +36,7 @@ Individuals are always at the per-step (`VAL_EVERY_N_STEPS`) cadence.
 ## Fresh run
 
 ```bash
-# df=1.0 2x2 grid (d{6,12} x w{384,768}), 31 epochs, 20M resolution, charge cis260009p
+# df=1.0 2x2 grid (d{6,12} x w{384,768}), 31 epochs, 20M resolution, charge cis260095p
 bash .claude/skills/valloss-sweep/scripts/run_sweep.sh
 
 # preview without submitting
@@ -80,7 +80,7 @@ MODE=extend GRID_TAG=fulldata_20260528_150057 NUM_EPOCHS=40 PREV_EPOCHS=31 \
 | `PREV_EPOCHS` | — | extend+step: prior epoch count, to derive `START_STEP` |
 | `START_STEP` | `0` (fresh) | replay evaluates step ckpts with `S ≥ START_STEP` |
 | `WEIGHT_DECAY` | `0` | AdamW decoupled wd |
-| `ACCOUNT` | `cis260009p` | SLURM allocation charged for **compute** |
+| `ACCOUNT` | `cis260095p` | SLURM allocation charged for **compute** (cis260009p revoked 2026-06) |
 | `CHECKPOINT_BASE` | `checkpoints` | where ckpts are written (under repo) |
 | `TRAIN_TIME` / `REPLAY_TIME` | `03:00:00` / `06:00:00` | per-array time limits |
 | `DRY_RUN` | `0` | print sbatch lines only |
@@ -112,7 +112,8 @@ extend**: the training log should show `Resumed weights from …epoch_<PREV>.pt
 - **Storage**: ckpts land under `CHECKPOINT_BASE` (cis260161p). `ACCOUNT` only
   charges compute — its disk being full is irrelevant. For very large grids route
   big cells to a roomier allocation via `CHECKPOINT_BASE` + the symlink scheme.
-- **cis260009p compute, cis260161p storage** is the standing convention here.
+- **cis260095p compute, cis260161p storage** is the standing convention here
+  (cis260009p compute access was revoked 2026-06 — see the project memory).
 
 ## After it finishes
 

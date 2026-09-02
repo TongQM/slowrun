@@ -53,7 +53,7 @@ COMPLETEP="${COMPLETEP:-1}"; NO_VE_PROJS="${NO_VE_PROJS:-1}"; NO_WARMDOWN="${NO_
 COMPILE_MODE="${COMPILE_MODE:-inductor}"
 MUP_BASE_WIDTH="${MUP_BASE_WIDTH:-768}"; MUP_BASE_DEPTH="${MUP_BASE_DEPTH:-12}"; MUP_BASE_HEAD_DIM="${MUP_BASE_HEAD_DIM:-64}"
 # SLURM
-ACCOUNT="${ACCOUNT:-cis260009p}"                   # compute charged here
+ACCOUNT="${ACCOUNT:-cis260095p}"                   # compute charged here (cis260009p access revoked 2026-06)
 GPU_SPEC="${GPU_SPEC:-h100-80:1}"
 CHECKPOINT_BASE="${CHECKPOINT_BASE:-checkpoints}"  # checkpoints stored here (under REPO)
 TRAIN_TIME="${TRAIN_TIME:-03:00:00}"
