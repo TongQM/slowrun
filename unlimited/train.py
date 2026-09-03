@@ -36,6 +36,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.utils.parametrize as parametrize
 import torch.distributed as dist
 from torch import Tensor
 import wandb
@@ -457,6 +458,34 @@ class Block(nn.Module):
         return x
 
 
+class ExpReparam(nn.Module):
+    """c = c0 * exp(raw). A multiplicative (log-space) reparametrization of a
+    scalar coefficient, registered via torch.nn.utils.parametrize so the rest
+    of the model keeps reading the plain attribute (e.g. `self.x0_lambdas`)
+    with no other code changes.
+
+    Why: AdamW's update is near scale-invariant to gradient magnitude once its
+    second-moment estimate warms up, so a constant forward multiplier on a
+    RAW learnable scalar barely changes how far that scalar drifts per step --
+    it fixes initialization but not training dynamics (see the commit that
+    introduced this class for the measured before/after). Under this
+    reparametrization, AdamW's near-constant ABSOLUTE step on `raw` becomes a
+    near-constant RELATIVE (percentage) step on `c`, which is depth-invariant
+    by construction: a percentage drift doesn't depend on what c0 happens to
+    be. `right_inverse` makes registration a no-op on the current value: with
+    raw pre-set to 0, forward gives back exactly c0.
+    """
+    def __init__(self, c0: float):
+        super().__init__()
+        self.c0 = c0
+
+    def forward(self, raw):
+        return self.c0 * torch.exp(raw)
+
+    def right_inverse(self, value):
+        return torch.log(value / self.c0)
+
+
 class GPT(nn.Module):
     def __init__(self, config, pad_vocab_size_to=64):
         super().__init__()
@@ -467,17 +496,6 @@ class GPT(nn.Module):
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab}")
         # Depth scaling: L_base / L (reduces residual branch magnitude in deep models)
         depth_scale = (config.mup_base_depth / config.n_layer) if config.completep else 1.0
-        # Table 1 (CompleteP, alpha=1) puts m_L^-alpha = L_base/L on EVERY residual-stream
-        # contribution. The paper's architecture has exactly two (MHA, MLP); ours has two
-        # more -- the per-layer x0 injection and the U-Net skips -- which the table cannot
-        # name but the same rule governs. Applied here as a CONSTANT, mirroring how
-        # Block.forward scales attn/mlp: folding it into the learnable scalars' init
-        # instead would be washed out within a couple of steps, because Table 1 gives
-        # bias/scalar LRs m_L^(alpha-1) = 1, i.e. no depth scaling.
-        # Before 2026-09, this factor reached ONLY attn/mlp: residual RMS then grew
-        # 5.45x from L=4 to L=32 at init and 10.2x by step 5. Runs from before that
-        # date used the incomplete version; reproduce them by checking out the commit.
-        self.resid_path_scale = depth_scale
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab, config.n_embd),
             "h": nn.ModuleList([Block(config, i, depth_scale=depth_scale) for i in range(config.n_layer)]),
@@ -492,6 +510,8 @@ class GPT(nn.Module):
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
+        _X0_DEPTH_EXPONENT = 1.0    # matches depth_scale / Table 1 (MHA, MLP)
+        _SKIP_DEPTH_EXPONENT = 0.75 # see note below
         kv_dim = config.n_kv_head * head_dim
         # ve_projs is empty when --no-ve-projs is set; the forward path then sees
         # str(i) not in self.ve_projs and passes ve=None into attention.
@@ -502,6 +522,47 @@ class GPT(nn.Module):
         # U-Net skip connections: encoder layer i → decoder layer (n_layer - 1 - i)
         self.encoder_layers = config.n_layer // 2
         self.skip_weights = nn.Parameter(torch.ones(self.encoder_layers))
+        # Table 1 (CompleteP, alpha=1) puts m_L^-alpha = L_base/L on EVERY residual-stream
+        # contribution. The paper's architecture has exactly two (MHA, MLP), handled above
+        # via depth_scale/Block; ours has two more that the table cannot name but the same
+        # rule governs: the per-layer x0 injection and the U-Net skips just registered.
+        #
+        # Applying the L_base/L factor as a plain forward-pass CONSTANT (multiplying the
+        # raw learnable x0_lambdas/skip_weights) fixes initialization but not training
+        # dynamics: AdamW's update is near scale-invariant to gradient magnitude once its
+        # second moment warms up, so a constant multiplier barely changes how far the RAW
+        # scalar drifts per step -- residual RMS max/min across L in {4,8,16,32} measured
+        # 1.17 at init but 1.51-1.63 by step 5 under that approach (commit c660582).
+        #
+        # Registering ExpReparam instead makes AdamW's near-constant ABSOLUTE per-step
+        # move on the raw parameter into a near-constant RELATIVE (percentage) move on the
+        # effective coefficient -- depth-invariant by construction. Measured on a depth x
+        # width grid, 3 seeds, 40 steps (experiments/diagnostic/reparam_search_depth.py):
+        # max/min goes from {1.17 at init, 1.33-1.37 by step 40} under the constant-factor
+        # approach to {1.07 at init, 1.06-1.10 by step 40} here -- both essentially flat.
+        #
+        # skip_weights uses exponent 0.75, not 1.0: an isolated exponent sweep on
+        # bigram-structured data found 0.75 near-flat across the whole 40-step
+        # trajectory (mean spread 1.086 at BOTH step 0 and step 40), while 1.0 drifts
+        # (1.14 -> 1.20) and 0.5 undercorrects (1.43 -> 1.36). Plausible mechanistically:
+        # a skip addition copies a whole OTHER layer's already-full-scale activation,
+        # not a small residual branch output, so it needn't obey the same depth law as
+        # the attn/mlp branches. x0 keeps exponent 1.0 (matches Table 1 exactly; the
+        # isolated log-param test at exponent 1.0 was already close to flat: 1.04 ->
+        # 1.05-1.13 through step 20 across 3 seeds).
+        #
+        # Registration is a no-op on the CURRENT value (right_inverse(c0) = log(1) = 0),
+        # so init_weights() below simply zeros the raw `.original` parameter to reset to
+        # exactly c0, mirroring the plain `.fill_()` calls used for every other scalar.
+        if config.completep:
+            x0_c0 = 0.1 * (config.mup_base_depth / config.n_layer) ** _X0_DEPTH_EXPONENT
+            with torch.no_grad():
+                self.x0_lambdas.fill_(x0_c0)
+            parametrize.register_parametrization(self, "x0_lambdas", ExpReparam(x0_c0))
+            skip_c0 = 1.0 * (config.mup_base_depth / config.n_layer) ** _SKIP_DEPTH_EXPONENT
+            with torch.no_grad():
+                self.skip_weights.fill_(skip_c0)
+            parametrize.register_parametrization(self, "skip_weights", ExpReparam(skip_c0))
         self.rotary_seq_len = config.sequence_len * 10
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
@@ -546,8 +607,19 @@ class GPT(nn.Module):
                 torch.nn.init.uniform_(proj.weight, -s, s)
 
         self.resid_lambdas.fill_(1.0)
-        self.x0_lambdas.fill_(0.1)
-        self.skip_weights.fill_(1.0)
+        # x0_lambdas/skip_weights: under completep, both are ExpReparam-parametrized
+        # (see __init__), so `self.x0_lambdas` is a COMPUTED tensor -- `.fill_()` on it
+        # is a silent no-op (mutates a throwaway tensor, never touches the underlying
+        # raw parameter). Reset the raw `.original` to zero instead: forward gives back
+        # exactly c0 (registration's no-op point), matching this call's intent exactly.
+        # Without completep, no parametrization is registered and these ARE the plain
+        # leaf parameters, so `.fill_()` behaves as it always has.
+        if self.config.completep:
+            self.parametrizations.x0_lambdas.original.zero_()
+            self.parametrizations.skip_weights.original.zero_()
+        else:
+            self.x0_lambdas.fill_(0.1)
+            self.skip_weights.fill_(1.0)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
@@ -581,8 +653,18 @@ class GPT(nn.Module):
         embed_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
-        x0_params = [self.x0_lambdas]
-        skip_params = [self.skip_weights]
+        # Under completep, x0_lambdas/skip_weights are ExpReparam-parametrized (see
+        # __init__): the plain attribute is now a COMPUTED (non-leaf) tensor, which
+        # torch.optim raises "can't optimize a non-leaf Tensor" on. The optimizer must
+        # instead see the underlying raw parameter, reached via
+        # `self.parametrizations.<name>.original`. Without completep, no parametrization
+        # is registered and these ARE the plain leaf parameters, as before.
+        if self.config.completep:
+            x0_params = [self.parametrizations.x0_lambdas.original]
+            skip_params = [self.parametrizations.skip_weights.original]
+        else:
+            x0_params = [self.x0_lambdas]
+            skip_params = [self.skip_weights]
 
         if self.config.optimizer == 'adamw':
             # Pure AdamW: AdamW for everything including matrix params.
@@ -637,8 +719,8 @@ class GPT(nn.Module):
             # Encoder layer j connects to decoder layer (n_layer - 1 - j)
             j = self.config.n_layer - 1 - i
             if 0 <= j < self.encoder_layers:
-                x = x + self.resid_path_scale * self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
-            x = self.resid_lambdas[i] * x + self.resid_path_scale * self.x0_lambdas[i] * x0
+                x = x + self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
         return x
@@ -652,7 +734,7 @@ class GPT(nn.Module):
         # Encoder half: run layers and collect outputs for skip connections
         encoder_outputs = []
         for i in range(self.encoder_layers):
-            x = self.resid_lambdas[i] * x + self.resid_path_scale * self.x0_lambdas[i] * x0
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
             encoder_outputs.append(x)
