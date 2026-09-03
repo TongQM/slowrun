@@ -13,7 +13,7 @@
 # Cheap (minutes): 8 cells x ~9 forward/backward steps, no HP grid.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
-source ~/.bashrc 2>/dev/null || true
+module load anaconda3/2024.10-1
 conda activate slowrun
 WD="${WD:-0.0}"
 python experiments/diagnostic/coord_check_activations.py \
