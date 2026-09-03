@@ -467,6 +467,17 @@ class GPT(nn.Module):
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab}")
         # Depth scaling: L_base / L (reduces residual branch magnitude in deep models)
         depth_scale = (config.mup_base_depth / config.n_layer) if config.completep else 1.0
+        # Table 1 (CompleteP, alpha=1) puts m_L^-alpha = L_base/L on EVERY residual-stream
+        # contribution. The paper's architecture has exactly two (MHA, MLP); ours has two
+        # more -- the per-layer x0 injection and the U-Net skips -- which the table cannot
+        # name but the same rule governs. Applied here as a CONSTANT, mirroring how
+        # Block.forward scales attn/mlp: folding it into the learnable scalars' init
+        # instead would be washed out within a couple of steps, because Table 1 gives
+        # bias/scalar LRs m_L^(alpha-1) = 1, i.e. no depth scaling.
+        # Before 2026-09, this factor reached ONLY attn/mlp: residual RMS then grew
+        # 5.45x from L=4 to L=32 at init and 10.2x by step 5. Runs from before that
+        # date used the incomplete version; reproduce them by checking out the commit.
+        self.resid_path_scale = depth_scale
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab, config.n_embd),
             "h": nn.ModuleList([Block(config, i, depth_scale=depth_scale) for i in range(config.n_layer)]),
@@ -626,8 +637,8 @@ class GPT(nn.Module):
             # Encoder layer j connects to decoder layer (n_layer - 1 - j)
             j = self.config.n_layer - 1 - i
             if 0 <= j < self.encoder_layers:
-                x = x + self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+                x = x + self.resid_path_scale * self.skip_weights[i - self.encoder_layers] * encoder_outputs[j]
+            x = self.resid_lambdas[i] * x + self.resid_path_scale * self.x0_lambdas[i] * x0
             ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
         return x
@@ -641,7 +652,7 @@ class GPT(nn.Module):
         # Encoder half: run layers and collect outputs for skip connections
         encoder_outputs = []
         for i in range(self.encoder_layers):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            x = self.resid_lambdas[i] * x + self.resid_path_scale * self.x0_lambdas[i] * x0
             ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
             encoder_outputs.append(x)
