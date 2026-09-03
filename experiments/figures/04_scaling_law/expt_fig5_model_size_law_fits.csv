@@ -1,0 +1,12 @@
+form,param,value
+collapsed,L_inf,3.539089
+collapsed,c,0.930286
+collapsed,alpha,0.186736
+collapsed,R2,0.951541
+separable,L_inf,3.573057
+separable,c_L,0.595164
+separable,alpha_L,0.538163
+separable,c_N,24.843850
+separable,alpha_N,0.739653
+separable,R2,0.973159
+data,n_cells,12
