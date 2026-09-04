@@ -17,10 +17,26 @@ FINDINGS
        broken   17.9 -> 39.2   catastrophic AND growing
        constant  1.14 -> 1.31  plateaus
        logexp    1.14 -> 1.62  better before ~step 100, worse after, still rising
-   The fix delivers a ~30x improvement in depth invariance over broken. It does
-   NOT reach 1.00: ~1.3 is the residual, and the plain architecture with both
-   paths removed reaches ~1.02, so ~0.3 is the standing price of keeping x0 and
-   the U-Net skips at all.
+   The fix delivers a ~30x improvement in depth invariance over broken.
+
+   The residual 1.31 must be decomposed before it is read as imperfect transfer,
+   because max/min over the full ladder conflates a scaling violation with an
+   endpoint artifact. Per-depth RMS at step 200:
+       broken  12.17  19.35  36.34  79.16 189.05 477.42   monotone
+       constant 23.29  19.35  18.15  17.75  17.85  18.98   BOWL, min near L=16
+   The fixed curve does not drift -- it is a shallow bowl whose minimum sits near
+   L=16, and essentially all of the 1.31 is the single L=2 endpoint. Over
+   L in {8..64} the spread is 1.07. L=2 is below the base depth (L_base=4) and is
+   structurally degenerate for the U-Net (one encoder layer, one decoder layer,
+   a single skip), so invariance is not expected there.
+   The load-bearing statistic is the scaling exponent, RMS ~ L^p fit over
+   L in {8..64}:
+       step        0     25     50    100    200
+       broken  1.102  1.164  1.222  1.224  1.240
+       constant 0.064  0.046  0.030  0.019  0.020
+   A genuine linear-in-L divergence is replaced by nothing measurable. Over the
+   production grid's own depth range (d6 -> d24, 4x) that is 5.58x of activation
+   drift before the fix and 1.03x after.
 
 2. Performance. 3 variants x 4 depths x 11 lrs x 4 seeds = 528 training runs,
    best-vs-best (each arm at its OWN optimal lr): the largest gap between any
@@ -152,3 +168,25 @@ print("\ndepth-ladder spread (max/min), production lr:")
 print("  variant    " + "".join(f"{'st'+str(s):>8}" for s in steps))
 for v in ORDER:
     print(f"  {NAMES[v]:<10} " + "".join(f"{spread(v,'depth',DEPTHS,s):>8.2f}" for s in steps))
+
+# The decomposition that keeps max/min from being misread: a monotone drift is a
+# scaling violation, a bowl is a finite-depth artifact. Fit the exponent away from
+# the L=2 endpoint (L=2 < mup_base_depth, and the U-Net is degenerate there).
+FIT = (8, 16, 32, 64)
+print("\nper-depth residual RMS, step 200:")
+print("  variant    " + "".join(f"{'L='+str(L):>9}" for L in DEPTHS))
+for v in ORDER:
+    print(f"  {NAMES[v]:<10} " + "".join(
+        f"{np.mean(coord[(v,'depth',L,200)]):9.2f}" for L in DEPTHS))
+print(f"\nscaling exponent p in RMS ~ L^p, fit over L in {FIT}:")
+print("  variant    " + "".join(f"{'st'+str(s):>9}" for s in steps))
+for v in ORDER:
+    ps = [np.polyfit(np.log(FIT),
+                     np.log([np.mean(coord[(v, "depth", L, s)]) for L in FIT]), 1)[0]
+          for s in steps]
+    print(f"  {NAMES[v]:<10} " + "".join(f"{p:9.3f}" for p in ps))
+print("\nimplied activation drift over the production range d6 -> d24 (4x), step 200:")
+for v in ORDER:
+    p = np.polyfit(np.log(FIT),
+                   np.log([np.mean(coord[(v, "depth", L, 200)]) for L in FIT]), 1)[0]
+    print(f"  {NAMES[v]:<10} {4 ** p:.2f}x")
