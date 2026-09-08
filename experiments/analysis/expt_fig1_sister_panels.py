@@ -15,8 +15,9 @@ Panels:
   C | overfit onset vs P     — filled = nadir epoch (left), open = nadir steps (right)
   D | val + train loss vs epoch, DEPTH ladder (W=768), coloured by N
   E | val + train loss vs epoch, WIDTH ladder (L=12),  coloured by N
-  F | overfit onset vs N     — filled = nadir epoch (left, power-law fit),
-                               open = min val loss L* (right, power-law fit)
+  F | overfit onset vs N     — nadir epoch (left axis), the same optimum in steps
+                               (right axis), and three power-law fits: all 12 cells,
+                               panel D's depth ladder, panel E's width ladder
 
 D and E use the epoch axis only: at fixed P the step axis is the same picture
 rescaled by 1/763, so a second axis would carry no information (unlike row 1,
@@ -25,14 +26,24 @@ where P varies and the epoch axis is what collapses the curves).
 The headline contrast the two rows are built to show: the optimal number of
 epochs is only weakly sensitive to P (14 -> 9 epochs over a 10x range,
 E* ~ P^-0.16) but falls steeply in model size (30 -> 5 epochs over a 40x range,
-E* ~ N^-0.43, or N^-0.33 restricted to the bug-immune L=12 row). Per decade of
-scaling that is a ~1.4x shrink from data vs a ~2.1-2.7x shrink from parameters.
+E* ~ N^-0.43). Per decade of scaling that is a ~1.4x shrink from data vs a
+~2.6x shrink from parameters.
 
-Caveat carried into the caption: the depth axis of row 2 was measured under the
-pre-fix CompleteP residual scaling (unlimited/train.py commit c660582), which
-left the x0-injection and U-Net skip paths unscaled. The width axis and the
-L=12 row are unaffected (12/L = 1 exactly at L=12), so the L=12-only exponent
-is quoted as the trustworthy one and the full-grid exponent as provisional.
+Panel F fits each single-axis ladder as well as the joint set, so the two are
+reported symmetrically: depth (W=768, 6 cells) gives N^-0.394, which at fixed
+width is also the exponent in L; width (L=12, 4 cells) gives N^-0.332, i.e.
+W^-0.663 since N ~ W^2.
+
+Caveat, weaker than it first appeared: the depth axis of row 2 was measured
+under the pre-fix CompleteP residual scaling (unlimited/train.py commit
+c660582), which left the x0-injection and U-Net skip paths unscaled. The L=12
+ladder is the one subset the correction cannot touch (12/L = 1 exactly), and it
+gives the lowest exponent, 0.332. But the L=6 ladder -- same width-only
+structure, and pre-fix-AFFECTED -- gives 0.453, bracketing the joint fit from
+the other side. A bug signature would put the immune subset apart from the
+affected ones; instead the 0.33-0.45 spread tracks which four points a ladder
+happens to contain. So 0.426 is quoted as the exponent, with that spread as its
+uncertainty, and the corrected depth runs are still owed.
 
 Outputs:
   experiments/figures/10_sister_panels/expt_fig1_sister_panels.{pdf,png}
@@ -161,11 +172,15 @@ def companion_figure(rows, order, Nvals, pal_N, lstar_P, fits):
     """Optimal stopping and attainable loss vs model size — the standalone version
     of panels (D-F) asked for beside the model-size scaling law, plus the
     side-by-side power laws in N and in P."""
-    (A_all, a_all, r2_all), (A_w, a_w, r2_w) = fits["E_all"], fits["E_L12"]
+    A_all, a_all, r2_all = fits["E_all"]
+    A_d, a_d, r2_d = fits["E_depth"]
+    A_w, a_w, r2_w = fits["E_width"]
     Linf, cN, aN, r2_LN = fits["L_vs_N"]
     LinfP, cP, aP_, r2_LP = fits["L_vs_P"]
 
     Ns = np.array([r["N"] for r in rows], float)
+    Nd = np.array([r["N"] for r in rows if r["W"] == 768], float)
+    Nw = np.array([r["N"] for r in rows if r["L"] == 12], float)
     fig, axes = plt.subplots(1, 2, figsize=(21, 8.5))
     fig.subplots_adjust(wspace=0.42)
 
@@ -178,10 +193,14 @@ def companion_figure(rows, order, Nvals, pal_N, lstar_P, fits):
     ax2 = ax.twinx()
     ax2.set_yscale("log")
     gN = np.logspace(np.log10(Ns.min()), np.log10(Ns.max()), 200)
+    gD = np.logspace(np.log10(Nd.min()), np.log10(Nd.max()), 200)
+    gW = np.logspace(np.log10(Nw.min()), np.log10(Nw.max()), 200)
     ax.plot(gN, A_all * gN ** (-a_all), "k--", lw=3.0, zorder=2,
             label=fr"all 12 cells:  $\mathcal{{E}}^\ast\propto N^{{-{a_all:.2f}}}$  ($R^2$={r2_all:.2f})")
-    ax.plot(gN, A_w * gN ** (-a_w), color="0.45", ls=":", lw=3.5, zorder=2,
-            label=fr"$L$=12 row only:  $N^{{-{a_w:.2f}}}$  ($R^2$={r2_w:.2f})")
+    ax.plot(gD, A_d * gD ** (-a_d), color="0.30", ls="-", lw=2.6, zorder=2,
+            label=fr"depth ladder, $W$=768:  $N^{{-{a_d:.2f}}}$  ($R^2$={r2_d:.2f})")
+    ax.plot(gW, A_w * gW ** (-a_w), color="0.50", ls=":", lw=3.5, zorder=2,
+            label=fr"width ladder, $L$=12:  $N^{{-{a_w:.2f}}}$  ($R^2$={r2_w:.2f})")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8])
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
@@ -241,9 +260,12 @@ def companion_figure(rows, order, Nvals, pal_N, lstar_P, fits):
 
 
 def write_latex_table(fits, path):
-    (A_all, a_all, r2_all), (A_w, a_w, r2_w) = fits["E_all"], fits["E_L12"]
+    A_all, a_all, r2_all = fits["E_all"]
+    A_w, a_w, r2_w = fits["E_width"]
     Linf, cN, aN, r2_LN = fits["L_vs_N"]
     LinfP, cP, aP_, r2_LP = fits["L_vs_P"]
+    A_d, a_d, r2_d = fits["E_depth"]
+    A_w6, a_w6, r2_w6 = fits["E_width_L6"]
     A_P, a_P, r2_P = fits["E_vs_P"]
     with open(path, "w") as fh:
         fh.write(r"""% auto-generated by experiments/analysis/expt_fig1_sister_panels.py -- do not hand-edit
@@ -251,9 +273,12 @@ def write_latex_table(fits, path):
   \centering
   \caption{Fitted exponents for the multi-epoch optimal-stopping and attainable-loss
   relations. Model-size rows use the 12 cells at $P{=}100$M ($\lambda{=}0$, constant LR,
-  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The $L{=}12$
-  row is quoted separately because the depth axis was measured before the CompleteP
-  residual-path correction, which is exactly the identity at $L{=}L_{\mathrm{base}}{=}12$.
+  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The two
+  single-axis ladders are fitted separately for symmetry. The $L{=}12$ ladder is also the
+  only subset untouched by the pre-correction CompleteP residual scaling (the depth factor
+  $L_{\mathrm{base}}/L$ is the identity at $L{=}12$), but the $L{=}6$ ladder, which the
+  correction does affect, brackets it from above, so the subset spread of $0.33$--$0.45$
+  reflects sampling over four-point ladders rather than a parameterization artifact.
   The two attainable-loss fits have very different $\mathcal{L}_\infty$, so their exponents
   describe approach rates to different asymptotes and should not be compared directly.}
   \label{tab:stopping_exponents}
@@ -265,8 +290,12 @@ def write_latex_table(fits, path):
         EOL = " \\\\\n"
         fh.write(f"    Optimal stopping epoch & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_all:.3f}$ & -- & ${r2_all:.3f}$ & 12" + EOL)
-        fh.write(f"    \\quad ($L{{=}}12$ row only) & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
+        fh.write(f"    \\quad depth ladder ($W{{=}}768$) & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
+                 f" & ${a_d:.3f}$ & -- & ${r2_d:.3f}$ & 6" + EOL)
+        fh.write(f"    \\quad width ladder ($L{{=}}12$) & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_w:.3f}$ & -- & ${r2_w:.3f}$ & 4" + EOL)
+        fh.write(f"    \\quad width ladder ($L{{=}}6$) & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
+                 f" & ${a_w6:.3f}$ & -- & ${r2_w6:.3f}$ & 4" + EOL)
         fh.write(f"    Optimal stopping epoch & $\\mathcal{{E}}^\\ast \\propto P^{{-\\alpha}}$"
                  f" & ${a_P:.3f}$ & -- & ${r2_P:.3f}$ & 20" + EOL)
         fh.write("    \\midrule\n")
@@ -402,10 +431,16 @@ def main():
     Ns = np.array([r["N"] for r in rows], float)
     eps = np.array([r["ep_star"] for r in rows], float)
     lstars = np.array([r["l_star"] for r in rows], float)
-    is12 = np.array([r["L"] == 12 for r in rows])
+    # The two single-axis ladders are exactly the ones drawn in panels (D) and (E),
+    # so panel (F) fits what those panels show plus the joint fit.
+    is_depth = np.array([r["W"] == 768 for r in rows])     # panel (D): vary L
+    is_width = np.array([r["L"] == 12 for r in rows])      # panel (E): vary W
+    is_w6 = np.array([r["L"] == 6 for r in rows])          # second width ladder, for the CSV
 
     A_all, a_all, r2_all = powerlaw_fit(Ns, eps)
-    A_w, a_w, r2_w = powerlaw_fit(Ns[is12], eps[is12])
+    A_d, a_d, r2_d = powerlaw_fit(Ns[is_depth], eps[is_depth])
+    A_w, a_w, r2_w = powerlaw_fit(Ns[is_width], eps[is_width])
+    A_w6, a_w6, r2_w6 = powerlaw_fit(Ns[is_w6], eps[is_w6])
     Linf, cN, aN, r2_L = saturating_fit(Ns / 1e6, lstars)
     P_grid = np.array(sorted(lstar_P), float)
     LP_grid = np.array([np.mean(lstar_P[k]) for k in sorted(lstar_P)], float)
@@ -414,15 +449,15 @@ def main():
     for k, r in zip(order, rows):
         ax_f.scatter([r["N"]], [r["ep_star"]], marker="o", s=200, color=pal_N[k],
                      edgecolor="black", linewidth=0.9, zorder=4)
-        ax_f2.scatter([r["N"]], [r["l_star"]], marker="s", s=150, facecolors="none",
-                      edgecolors="0.35", linewidth=1.6, zorder=3)
     gN = np.logspace(np.log10(Ns.min()), np.log10(Ns.max()), 200)
+    gD = np.logspace(np.log10(Ns[is_depth].min()), np.log10(Ns[is_depth].max()), 200)
+    gW = np.logspace(np.log10(Ns[is_width].min()), np.log10(Ns[is_width].max()), 200)
     ax_f.plot(gN, A_all * gN ** (-a_all), "k--", lw=2.5, zorder=2,
-              label=fr"all 12 cells: $\mathcal{{E}}^\ast\propto N^{{-{a_all:.2f}}}$")
-    ax_f.plot(gN, A_w * gN ** (-a_w), color="0.45", ls=":", lw=3.0, zorder=2,
-              label=fr"$L$=12 row only: $N^{{-{a_w:.2f}}}$")
-    ax_f2.plot(gN, Linf + cN * (gN / 1e6) ** (-aN), color="0.35", ls="-.", lw=2.0, zorder=1,
-               label=fr"$\mathcal{{L}}^\ast=\mathcal{{L}}_\infty+cN^{{-{aN:.2f}}}$")
+              label=fr"all 12 cells:  $N^{{-{a_all:.2f}}}$")
+    ax_f.plot(gD, A_d * gD ** (-a_d), color="0.30", ls="-", lw=2.2, zorder=2,
+              label=fr"depth ladder (D):  $N^{{-{a_d:.2f}}}$")
+    ax_f.plot(gW, A_w * gW ** (-a_w), color="0.50", ls=":", lw=3.2, zorder=2,
+              label=fr"width ladder (E):  $N^{{-{a_w:.2f}}}$")
 
     # ------------------------------------------------------------ cosmetics
     style_handles = [
@@ -469,18 +504,26 @@ def main():
 
     ax_f.set_xscale("log"); ax_f.set_yscale("log")
     ax_f.set_xlabel(r"non-embedding parameters  $N = 16LW^2$", fontsize=28)
-    ax_f.set_ylabel(r"nadir epoch  $\mathcal{E}^\ast$  (filled)", color="black", fontsize=24)
-    ax_f2.set_ylabel(r"min val loss  $\mathcal{L}^\ast$  (open)", color="0.35", fontsize=24)
+    ax_f.set_ylabel(r"nadir epoch  $\mathcal{E}^\ast$", color="black", fontsize=24)
+    # right axis mirrors panel (C): the same optimum expressed in optimizer steps.
+    ax_f2.set_ylabel(r"nadir steps  $s^\ast$", color="0.35", fontsize=24)
+    ax_f2.set_yscale("log")
+    ax_f2.set_ylim([v * STEPS_PER_EPOCH for v in ax_f.get_ylim()])
+    _fsticks = [4000, 6000, 10000, 15000, 20000]
+    ax_f2.yaxis.set_major_locator(FixedLocator(_fsticks))
+    ax_f2.yaxis.set_major_formatter(FixedFormatter([f"{t/1000:g}k" for t in _fsticks]))
+    ax_f2.yaxis.set_minor_locator(NullLocator())
+    ax_f2.tick_params(colors="0.35")
+    ax_f2.grid(False)
     ax_f.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8])
     ax_f.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
     ax_f.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax_f.set_yticks([5, 7, 10, 15, 20, 30])
     ax_f.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:g}"))
+    ax_f.yaxis.set_minor_formatter(plt.NullFormatter())
     ax_f.set_title(r"(F)  overfit onset vs $N$", fontsize=22, loc="left")
     ax_f.grid(True, alpha=0.25, which="both")
-    ax_f.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=14,
-                title=r"filled: $\mathcal{E}^\ast$ (left axis)", title_fontsize=13)
-    ax_f2.legend(loc="upper right", frameon=True, framealpha=0.92, fontsize=14,
-                 title=r"open: $\mathcal{L}^\ast$ (right axis)", title_fontsize=13)
+    ax_f.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=14)
 
     # shared colour legends, one per row, below the figure
     fig.legend(P_handles, P_labels, loc="center", frameon=True, framealpha=0.92,
@@ -515,8 +558,14 @@ def main():
         fh.write("quantity,subset,n_cells,form,A_or_Linf,c,exponent,R2,note\n")
         fh.write(f"nadir_epoch,all_cells,{len(rows)},E*=A*N^-a,{A_all:.6g},,{a_all:.4f},{r2_all:.4f},"
                  "provisional: depth axis measured pre-CompleteP-residual-fix\n")
-        fh.write(f"nadir_epoch,L12_row,{int(is12.sum())},E*=A*N^-a,{A_w:.6g},,{a_w:.4f},{r2_w:.4f},"
-                 "bug-immune: 12/L=1 exactly at L=12\n")
+        fh.write(f"nadir_epoch,depth_ladder_W768,{int(is_depth.sum())},E*=A*N^-a,{A_d:.6g},,"
+                 f"{a_d:.4f},{r2_d:.4f},vary L only; at fixed W the same exponent applies to L\n")
+        fh.write(f"nadir_epoch,width_ladder_L12,{int(is_width.sum())},E*=A*N^-a,{A_w:.6g},,"
+                 f"{a_w:.4f},{r2_w:.4f},vary W only; N ~ W^2 so the exponent in W is "
+                 f"{2*a_w:.4f}. Also the only pre-fix-immune subset (12/L=1 at L=12)\n")
+        fh.write(f"nadir_epoch,width_ladder_L6,{int(is_w6.sum())},E*=A*N^-a,{A_w6:.6g},,"
+                 f"{a_w6:.4f},{r2_w6:.4f},second width ladder, pre-fix-affected; brackets the "
+                 "L=12 ladder from above, so the subset spread is not a bug signature\n")
         fh.write(f"min_val_loss,all_cells,{len(rows)},L*=Linf+c*N_M^-a,{Linf:.6f},{cN:.6f},"
                  f"{aN:.4f},{r2_L:.4f},N in millions\n")
         fh.write(f"nadir_epoch,vs_P_row1,{len(nad_P)},E*=A*P^-a,{A_P:.6g},,{a_P:.4f},{r2_P:.4f},"
@@ -526,7 +575,8 @@ def main():
                  "two exponents are not directly comparable\n")
     print(f"saved {fits_csv}")
 
-    fits = dict(E_all=(A_all, a_all, r2_all), E_L12=(A_w, a_w, r2_w),
+    fits = dict(E_all=(A_all, a_all, r2_all), E_depth=(A_d, a_d, r2_d),
+                E_width=(A_w, a_w, r2_w), E_width_L6=(A_w6, a_w6, r2_w6),
                 L_vs_N=(Linf, cN, aN, r2_L), L_vs_P=(LinfP, cP, aP_, r2_LP),
                 E_vs_P=(A_P, a_P, r2_P))
     companion_figure(rows, order, Nvals, pal_N, lstar_P, fits)
@@ -537,8 +587,10 @@ def main():
     for r in sorted(rows, key=lambda r: r["N"]):
         print(f"{r['L']:>4} {r['W']:>6} {r['N']/1e6:>9.1f} {r['ep_star']:>7.2f} "
               f"{int(r['step_star']):>8} {r['l_star']:>8.4f}")
-    print(f"\nE* ~ N^-{a_all:.3f}   (all 12 cells,  R2={r2_all:.3f})  [provisional]")
-    print(f"E* ~ N^-{a_w:.3f}   (L=12 row only, R2={r2_w:.3f})  [bug-immune]")
+    print(f"\nE* ~ N^-{a_all:.3f}   (all 12 cells,        R2={r2_all:.3f})")
+    print(f"E* ~ N^-{a_d:.3f}   (depth ladder W=768,  R2={r2_d:.3f})  -> exponent in L = {a_d:.3f}")
+    print(f"E* ~ N^-{a_w:.3f}   (width ladder L=12,   R2={r2_w:.3f})  -> exponent in W = {2*a_w:.3f}  [pre-fix immune]")
+    print(f"E* ~ N^-{a_w6:.3f}   (width ladder L=6,    R2={r2_w6:.3f})  -> exponent in W = {2*a_w6:.3f}")
     print(f"L* = {Linf:.4f} + {cN:.4f} * N_M^-{aN:.4f}   (R2={r2_L:.3f})")
     print(f"E* ~ P^-{a_P:.3f}   (row 1, R2={r2_P:.3f})  -- compare: flat in P, steep in N")
 

@@ -3,9 +3,12 @@
   \centering
   \caption{Fitted exponents for the multi-epoch optimal-stopping and attainable-loss
   relations. Model-size rows use the 12 cells at $P{=}100$M ($\lambda{=}0$, constant LR,
-  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The $L{=}12$
-  row is quoted separately because the depth axis was measured before the CompleteP
-  residual-path correction, which is exactly the identity at $L{=}L_{\mathrm{base}}{=}12$.
+  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The two
+  single-axis ladders are fitted separately for symmetry. The $L{=}12$ ladder is also the
+  only subset untouched by the pre-correction CompleteP residual scaling (the depth factor
+  $L_{\mathrm{base}}/L$ is the identity at $L{=}12$), but the $L{=}6$ ladder, which the
+  correction does affect, brackets it from above, so the subset spread of $0.33$--$0.45$
+  reflects sampling over four-point ladders rather than a parameterization artifact.
   The two attainable-loss fits have very different $\mathcal{L}_\infty$, so their exponents
   describe approach rates to different asymptotes and should not be compared directly.}
   \label{tab:stopping_exponents}
@@ -14,7 +17,9 @@
     Quantity & Fitted form & Exponent & $\mathcal{L}_\infty$ & $R^2$ & Cells \\
     \midrule
     Optimal stopping epoch & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.426$ & -- & $0.933$ & 12 \\
-    \quad ($L{=}12$ row only) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.332$ & -- & $0.927$ & 4 \\
+    \quad depth ladder ($W{=}768$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.394$ & -- & $0.928$ & 6 \\
+    \quad width ladder ($L{=}12$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.332$ & -- & $0.927$ & 4 \\
+    \quad width ladder ($L{=}6$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.453$ & -- & $0.975$ & 4 \\
     Optimal stopping epoch & $\mathcal{E}^\ast \propto P^{-\alpha}$ & $0.158$ & -- & $0.857$ & 20 \\
     \midrule
     Min val loss & $\mathcal{L}_\infty + c\,N^{-\alpha_N}$ & $0.187$ & $3.539$ & $0.952$ & 12 \\
