@@ -1,0 +1,6 @@
+quantity,subset,n_cells,form,A_or_Linf,c,exponent,R2,note
+nadir_epoch,all_cells,12,E*=A*N^-a,27703.4,,0.4262,0.9329,provisional: depth axis measured pre-CompleteP-residual-fix
+nadir_epoch,L12_row,4,E*=A*N^-a,4622.51,,0.3316,0.9272,bug-immune: 12/L=1 exactly at L=12
+min_val_loss,all_cells,12,L*=Linf+c*N_M^-a,3.539089,0.930286,0.1867,0.9515,N in millions
+nadir_epoch,vs_P_row1,20,E*=A*P^-a,170.41,,0.1585,0.8567,row 1: dependence on unique tokens at fixed model size
+min_val_loss,vs_P_row1,10,L*=Linf+c*P_M^-a,1.413887,5.636797,0.1785,0.9967,P in millions; L_inf differs from the N fit so the two exponents are not directly comparable
