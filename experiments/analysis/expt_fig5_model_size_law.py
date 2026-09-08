@@ -1,8 +1,10 @@
 """Model-size scaling law at df=1.0 (100M tokens) -- the term Figure 5's caption
 asks for, split into three standalone figures rather than one multi-panel plot:
 
-  (1) COLLAPSED relation   L* vs P = 16*L*N^2 alone.
-  (2) SEPARABLE relation   L* vs L and L* vs N as two independent partial-
+  (1) COLLAPSED relation   L* vs N = 16*L*W^2 alone (N = total non-embedding
+                          params, W = width, L = depth; P stays reserved for unique
+                          tokens as in the theory sections).
+  (2) SEPARABLE relation   L* vs L and L* vs W as two independent partial-
                           residual plots (each axis's fit with the OTHER axis's
                           fitted contribution subtracted out), so the two power
                           laws are visible directly rather than as a bar chart
@@ -13,13 +15,13 @@ asks for, split into three standalone figures rather than one multi-panel plot:
                           simply plateauing.
 
 Data: every (depth, width) cell we have at df=1.0, lambda=0, constant LR, E=1,
-model 0 -- 12 cells spanning L in {6..60} and N in {384..1536}, a 40x range in
-non-embedding parameters.
+model 0 -- 12 cells spanning L in {6..60} and W in {384..1536}, a 40x range in
+non-embedding parameters N.
 
 Two fitted forms, both still computed (fit numbers feed all three figures):
 
-  collapsed:  L = L_inf + c * P^-alpha
-  separable:  L = L_inf + c_L * L^-alpha_L + c_N * N^-alpha_N
+  collapsed:  L = L_inf + c * N^-alpha
+  separable:  L = L_inf + c_L * L^-alpha_L + c_W * W^-alpha_W
 
 Caveats carried into the captions:
   - lambda=0, i.e. the UNREGULARIZED regime, where capacity gains are heavily
@@ -102,51 +104,51 @@ def main():
     data = {k: min_val(p) for k, p in CELLS.items()}
     data = {k: v for k, v in data.items() if v is not None}
     Ls = np.array([k[0] for k in data], float)
-    Ns = np.array([k[1] for k in data], float)
+    Ws = np.array([k[1] for k in data], float)
     ys = np.array([data[k] for k in data], float)
-    P = 16 * Ls * Ns**2 / 1e6
+    N = 16 * Ls * Ws**2 / 1e6
     ybar = ys.mean()
     sstot = float(np.sum((ys - ybar) ** 2))
 
     def r_col(t):
         Linf, c, a = t
-        return Linf + c * P ** (-a) - ys
+        return Linf + c * N ** (-a) - ys
     pa, ssa = fit(r_col, [3.5, 5.0, 0.3])
 
     def r_sep(t):
-        Linf, cL, aL, cN, aN = t
-        return Linf + cL * Ls ** (-aL) + cN * Ns ** (-aN) - ys
+        Linf, cL, aL, cW, aW = t
+        return Linf + cL * Ls ** (-aL) + cW * Ws ** (-aW) - ys
     pb, ssb = fit(r_sep, [3.5, 1.0, 0.3, 5.0, 0.3])
-    Linf, cL, aL, cN, aN = pb
+    Linf, cL, aL, cW, aW = pb
 
-    print(f"n = {len(ys)} cells,  L in {sorted(set(Ls.astype(int)))},  N in {sorted(set(Ns.astype(int)))}")
-    print(f"\ncollapsed  L = {pa[0]:.4f} + {pa[1]:.4f} * P^-{pa[2]:.4f}   R2={1-ssa/sstot:.4f}")
-    print(f"separable  L = {Linf:.4f} + {cL:.4f} * L^-{aL:.4f} + {cN:.4f} * N^-{aN:.4f}   R2={1-ssb/sstot:.4f}")
-    print(f"  depth exponent a_L = {aL:.3f}   width exponent a_N = {aN:.3f}")
+    print(f"n = {len(ys)} cells,  L in {sorted(set(Ls.astype(int)))},  W in {sorted(set(Ws.astype(int)))}")
+    print(f"\ncollapsed  L = {pa[0]:.4f} + {pa[1]:.4f} * N^-{pa[2]:.4f}   R2={1-ssa/sstot:.4f}")
+    print(f"separable  L = {Linf:.4f} + {cL:.4f} * L^-{aL:.4f} + {cW:.4f} * W^-{aW:.4f}   R2={1-ssb/sstot:.4f}")
+    print(f"  depth exponent a_L = {aL:.3f}   width exponent a_W = {aW:.3f}")
     print(f"  variance explained by separating the axes: {(ssa-ssb)/ssa*100:.1f}% of the collapsed SSE")
 
     style()
     cool_by_L = {d: c for d, c in zip(sorted(set(Ls.astype(int))),
                                       sns.color_palette("cool", len(set(Ls.astype(int)))))}
-    marker_by_N = {384: "o", 768: "s", 1152: "^", 1536: "D"}
+    marker_by_W = {384: "o", 768: "s", 1152: "^", 1536: "D"}
 
     # ---------------------------------------------------------------- (1)
     fig, ax = plt.subplots(figsize=(7.5, 6))
-    for (L, N), p, y in zip(data.keys(), P, ys):
-        ax.scatter(p, y, s=140, color=cool_by_L[int(L)], marker=marker_by_N[int(N)],
+    for (L, W), n, y in zip(data.keys(), N, ys):
+        ax.scatter(n, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
                    edgecolor="0.2", lw=1.3, zorder=3)
-    grid = np.logspace(np.log10(P.min()), np.log10(P.max()), 200)
+    grid = np.logspace(np.log10(N.min()), np.log10(N.max()), 200)
     ax.plot(grid, pa[0] + pa[1] * grid ** (-pa[2]), "k--", lw=2.5, zorder=2,
-           label=fr"fit: $\mathcal{{L}}_\infty$+{pa[1]:.2f}$\,P^{{-{pa[2]:.2f}}}$")
+           label=fr"fit: $\mathcal{{L}}_\infty$+{pa[1]:.2f}$\,N^{{-{pa[2]:.2f}}}$")
     from matplotlib.lines import Line2D
-    leg1 = [Line2D([0], [0], marker=marker_by_N[n], color="0.3", lw=0, markersize=10,
-                   label=f"$N$={n}") for n in sorted(marker_by_N)]
+    leg1 = [Line2D([0], [0], marker=marker_by_W[n], color="0.3", lw=0, markersize=10,
+                   label=f"$W$={n}") for n in sorted(marker_by_W)]
     leg2 = [Line2D([0], [0], marker="o", color=cool_by_L[d], lw=0, markersize=10,
                    label=f"$L$={d}") for d in sorted(cool_by_L)]
     ax.set_xscale("log")
-    ax.set_xlabel(r"non-embedding parameters  $P=16LN^2$  (M)")
+    ax.set_xlabel(r"non-embedding parameters  $N=16LW^2$  (M)")
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$")
-    ax.set_title(f"Collapsed relation: $P$ alone   ($R^2$={1-ssa/sstot:.3f})", fontsize=15)
+    ax.set_title(f"Collapsed relation: $N$ alone   ($R^2$={1-ssa/sstot:.3f})", fontsize=15)
     l1 = ax.legend(handles=leg1, loc="upper right", title="width", fontsize=11, title_fontsize=11)
     ax.add_artist(l1)
     ax.legend(handles=leg2 + [Line2D([0], [0], color="k", ls="--", lw=2.5, label="fit")],
@@ -162,37 +164,37 @@ def main():
     # ---------------------------------------------------------------- (2)
     # Partial residuals: for the depth panel, remove the FITTED width term from
     # each point so only the L-dependence remains (and symmetrically for width).
-    y_minus_width = ys - cN * Ns ** (-aN)
+    y_minus_width = ys - cW * Ws ** (-aW)
     y_minus_depth = ys - cL * Ls ** (-aL)
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.8))
     ax = axes[0]
-    for (L, N), x, y in zip(data.keys(), Ls, y_minus_width):
-        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_N[int(N)],
+    for (L, W), x, y in zip(data.keys(), Ls, y_minus_width):
+        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
                   edgecolor="0.2", lw=1.3, zorder=3)
     gl = np.logspace(np.log10(Ls.min()), np.log10(Ls.max()), 200)
     ax.plot(gl, Linf + cL * gl ** (-aL), "k--", lw=2.5, zorder=2)
     ax.set_xscale("log")
     ax.set_xlabel(r"depth  $L$")
-    ax.set_ylabel(r"$\mathcal{L}^* - c_N N^{-\alpha_N}$  (width term removed)")
+    ax.set_ylabel(r"$\mathcal{L}^* - c_W W^{-\alpha_W}$  (width term removed)")
     ax.set_title(fr"depth relation: $\alpha_L$={aL:.3f}", fontsize=15)
 
     ax = axes[1]
-    for (L, N), x, y in zip(data.keys(), Ns, y_minus_depth):
-        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_N[int(N)],
+    for (L, W), x, y in zip(data.keys(), Ws, y_minus_depth):
+        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
                   edgecolor="0.2", lw=1.3, zorder=3)
-    gn = np.logspace(np.log10(Ns.min()), np.log10(Ns.max()), 200)
-    ax.plot(gn, Linf + cN * gn ** (-aN), "k--", lw=2.5, zorder=2)
+    gn = np.logspace(np.log10(Ws.min()), np.log10(Ws.max()), 200)
+    ax.plot(gn, Linf + cW * gn ** (-aW), "k--", lw=2.5, zorder=2)
     ax.set_xscale("log")
-    ax.set_xlabel(r"width  $N$")
+    ax.set_xlabel(r"width  $W$")
     ax.set_ylabel(r"$\mathcal{L}^* - c_L L^{-\alpha_L}$  (depth term removed)")
-    ax.set_title(fr"width relation: $\alpha_N$={aN:.3f}", fontsize=15)
+    ax.set_title(fr"width relation: $\alpha_W$={aW:.3f}", fontsize=15)
 
     l1 = axes[1].legend(handles=leg1, loc="upper right", title="width", fontsize=10, title_fontsize=10)
     axes[1].add_artist(l1)
     axes[1].legend(handles=leg2, loc="lower left", title="depth", fontsize=10, title_fontsize=10)
 
-    fig.suptitle(r"Separable relation:  $\mathcal{L}^*=\mathcal{L}_\infty+c_L L^{-\alpha_L}+c_N N^{-\alpha_N}$"
+    fig.suptitle(r"Separable relation:  $\mathcal{L}^*=\mathcal{L}_\infty+c_L L^{-\alpha_L}+c_W W^{-\alpha_W}$"
                 fr"   ($R^2$={1-ssb/sstot:.3f})", fontsize=15)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     for ext in ("pdf", "png"):
@@ -206,30 +208,30 @@ def main():
     TOTAL_BATCH_SIZE = 131072  # tokens/step, project default (see slowrun/CLAUDE.md)
 
     ax = axes[0]
-    for (L, N) in data:
-        if N != 768:
+    for (L, W) in data:
+        if W != 768:
             continue
-        c = curve(CELLS[(L, N)])
+        c = curve(CELLS[(L, W)])
         st = np.array(sorted(c)); v = np.array([c[k] for k in st])
         tok_b = st * TOTAL_BATCH_SIZE / 1e9
         ax.plot(tok_b, v, "-", color=cool_by_L[int(L)], lw=2.5, label=f"$L$={L}")
     ax.set_xlabel("tokens seen (B, cumulative incl. repeats)")
     ax.set_ylabel(r"val loss $\mathcal{L}$")
-    ax.set_title(r"(A) depth ladder, $N$=768 fixed", fontsize=15)
+    ax.set_title(r"(A) depth ladder, $W$=768 fixed", fontsize=15)
     ax.legend(fontsize=11)
     ax.set_ylim(3.5, 5.5)
 
     ax = axes[1]
-    for (L, N) in data:
+    for (L, W) in data:
         if L not in (6, 12):
             continue
-        c = curve(CELLS[(L, N)])
+        c = curve(CELLS[(L, W)])
         st = np.array(sorted(c)); v = np.array([c[k] for k in st])
         tok_b = st * TOTAL_BATCH_SIZE / 1e9
         ls = "-" if L == 6 else "--"
         ax.plot(tok_b, v, ls, color=cool_by_L.get(int(L), "0.3"),
-                marker=marker_by_N[int(N)], markevery=25, ms=7, lw=2.2,
-                label=f"$L$={L}, $N$={N}")
+                marker=marker_by_W[int(W)], markevery=25, ms=7, lw=2.2,
+                label=f"$L$={L}, $W$={W}")
     ax.set_xlabel("tokens seen (B, cumulative incl. repeats)")
     ax.set_ylabel(r"val loss $\mathcal{L}$")
     ax.set_title(r"(B) width ladder, $L\in\{6,12\}$", fontsize=15)
@@ -258,7 +260,7 @@ def main():
         for n, v in zip(("L_inf", "c", "alpha"), pa):
             fh.write(f"collapsed,{n},{v:.6f}\n")
         fh.write(f"collapsed,R2,{1-ssa/sstot:.6f}\n")
-        for n, v in zip(("L_inf", "c_L", "alpha_L", "c_N", "alpha_N"), pb):
+        for n, v in zip(("L_inf", "c_L", "alpha_L", "c_W", "alpha_W"), pb):
             fh.write(f"separable,{n},{v:.6f}\n")
         fh.write(f"separable,R2,{1-ssb/sstot:.6f}\n")
         fh.write("data,n_cells,%d\n" % len(ys))

@@ -78,6 +78,10 @@ fi
 if [ "$NO_VE_PROJS" = "1" ]; then
     EXTRA_FLAGS+=(--no-ve-projs)
 fi
+# PLAIN_RESID=1 -> ablate the x0 injection and U-Net skips (standard pre-LN model)
+if [ "${PLAIN_RESID:-0}" = "1" ]; then
+    EXTRA_FLAGS+=(--plain-resid)
+fi
 if [ "${NO_WARMDOWN:-0}" = "1" ]; then
     EXTRA_FLAGS+=(--no-warmdown)
 fi

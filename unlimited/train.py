@@ -99,6 +99,15 @@ parser.add_argument("--no-ve-projs", action="store_true", default=False,
                     help="Disable the value-embedding projections (ve_projs) entirely. "
                          "When set, ve = None is passed into attention so V is just c_v(x). "
                          "Use to ablate ResFormer-style value injection from the architecture.")
+parser.add_argument("--plain-resid", action="store_true", default=False,
+                    help="Ablate the two non-standard residual paths: zero and FREEZE "
+                         "x0_lambdas (the per-layer x0 re-injection) and skip_weights "
+                         "(the U-Net skips). With --no-ve-projs this reduces the model to "
+                         "a standard pre-LN transformer, the architecture CompleteP is "
+                         "actually derived for. Those two paths are the ones that bypass "
+                         "depth_scale and break depth HP transfer; ablating them makes the "
+                         "residual stream exactly depth-invariant (coord check 1.00/1.02 "
+                         "vs 5.45/10.20). Use to test whether they are worth their cost.")
 parser.add_argument("--ensemble-type", type=str, default="init_shuffle",
                     choices=["init", "init_shuffle"],
                     help="'init' = different model inits, same data order; "
@@ -319,6 +328,7 @@ class GPTConfig:
     mup_base_depth: int = 12
     mup_base_head_dim: int = 64
     no_ve_projs: bool = False
+    plain_resid: bool = False
     optimizer: str = "adamw"
 
 def norm(x):
@@ -560,6 +570,14 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
         self.skip_weights.fill_(1.0)
+        if self.config.plain_resid:
+            # Ablate both non-standard residual paths: zero AND freeze, so training
+            # cannot reintroduce them. resid_lambdas stays at 1.0 -- it is a gain on
+            # the stream, not an extra contribution to it.
+            self.x0_lambdas.zero_()
+            self.skip_weights.zero_()
+            self.x0_lambdas.requires_grad_(False)
+            self.skip_weights.requires_grad_(False)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
@@ -593,8 +611,8 @@ class GPT(nn.Module):
         embed_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
-        x0_params = [self.x0_lambdas]
-        skip_params = [self.skip_weights]
+        x0_params = [] if self.config.plain_resid else [self.x0_lambdas]
+        skip_params = [] if self.config.plain_resid else [self.skip_weights]
 
         if self.config.optimizer == 'adamw':
             # Pure AdamW: AdamW for everything including matrix params.
@@ -2127,6 +2145,7 @@ def main():
                        mup_base_width=args.mup_base_width, mup_base_depth=args.mup_base_depth,
                        mup_base_head_dim=args.mup_base_head_dim,
                        no_ve_projs=args.no_ve_projs,
+                       plain_resid=args.plain_resid,
                        optimizer=args.optimizer)
 
     # Print config
