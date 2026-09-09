@@ -120,6 +120,36 @@ Outputs: `grid_combo_20260430_152533.png`, `slice_*.png`, `heatmap_best_val_loss
 - Launcher: [experiments/parallel/launch_q2_ensemble_size_sweep.sh](experiments/parallel/launch_q2_ensemble_size_sweep.sh) (submits train + per-size replay) + manual swap to [experiments/parallel/replay_array_fused.sh](experiments/parallel/replay_array_fused.sh) for the actual replay step.
 - SLURM: 40532724 train + 40533112 fused-replay + 40533113 cleanup.
 
+### Grid 4: aligned dynamics grid at P=100M (IN FLIGHT, launched 2026-09-09) — `aligned_20260909`
+
+Launcher: `experiments/parallel/launch_aligned_grid.sh` (one launcher, two regimes, cell lists
+pinned). This grid is the **dynamics regime**: `lambda=0`, constant LR (`--no-warmdown`), 40 epochs,
+val every 152 steps (19.9M tokens), model 0 (seed 42), full architecture with the depth-scaled
+residual paths (x0 by 12/L, U-Net skip by (12/L)^0.75; commit `9226bde` or later). It supersedes
+the pre-fix `fd_*` cells off the L=12 row; the L=12 row and the four 5-individual cells at
+d{6,12}/w{384,768} were already at this recipe and are kept.
+
+| Block | Cells | Jobs | SU |
+|---|---|---|---|
+| `dyn_rerun` | d6/{384,768,1152}, d18/768, d48/768, d60/768 | 45585040-45 | ~108 |
+| `dyn_fill` | d18/{384,1152,1536}, d24/{384,1152,1536} | 45585046-51 | ~149 |
+| `dyn_p20` | P=20M (df=0.2, 50 ep, val every 152 steps = 1 epoch = the same token grid): d{6,12,18,24}/768, d12/{384,1152,1536} | 45585052-61 | ~26 |
+| `dyn_ens226` | 4 init_shuffle individuals at L6/W1536 then L24/W768 (226M matched pair); step ckpts every 304 steps; fused replay E in {2,3,4} at step resolution; cleanup keeps step%1520==0 and every epoch | 45585188-93 | ~120 |
+
+Storage (hard quota 3.906 TB, 1.147 TB free at launch, nothing pre-existing deleted):
+- single-model cells prune per-epoch ckpts on the fly (`--keep-epoch-ckpts-every 5`, new in
+  train.py): newest + every 5th kept, ~190 GB total for all 19 runs;
+- ensemble cells are chained train -> replay -> cleanup with the second cell's training gated on
+  the first's cleanup, so one transient (510-640 GB at cadence 304) is on disk at a time. Cadence
+  152 (the existing ensemble cells' grid) would need 0.9-1.1 TB per cell and is only possible after
+  pruning the June `wdcooldown_low` step ckpts (1,144 GB) -- a decision left to the PI.
+
+Resolution rule: align on **tokens seen**, not epochs. At P=20M, 152 steps is one epoch; at P=100M
+it is a fifth. Ensemble points at cadence 304 coincide with every other existing ensemble point.
+
+The **capacity regime** (tuned lambda, cooldown ON; attainable loss only, no stopping time) is the
+`cap_lambda` / `cap_grid` blocks of the same launcher, not yet launched (~124 + ~191 SU).
+
 ### Grid 3: TBD (post-Q1/Q2)
 
 Possible follow-ups (ordered by likely value):
