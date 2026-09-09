@@ -496,7 +496,10 @@ def main():
                          (ax_w, "(E)", r"vary $W$ at $L$=12")):
         ax.set_xlabel("epoch", fontsize=28)
         ax.set_ylabel(r"$\mathcal{L}$", fontsize=28)
-        ax.set_xlim(0, 40); ax.set_ylim(3.4, 7.0)
+        # Same y-range as panels (A)/(B). The earlier 3.4 floor cut off almost every
+        # train curve -- train reaches 0.73 at the largest cell -- which hid exactly
+        # the train-falls-while-val-rises divergence the row exists to show.
+        ax.set_xlim(0, 40); ax.set_ylim(0, 8)
         ax.set_title(f"{tag}  {ttl}   ($P$=100M)", fontsize=22, loc="left")
         h, l = ax.get_legend_handles_labels()
         ax.legend(handles=h + style_handles, labels=l + [hh.get_label() for hh in style_handles],
