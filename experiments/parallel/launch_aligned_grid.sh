@@ -57,7 +57,10 @@ ENSEMBLE_MODE=logit
 MUP_BASE_WIDTH=768
 MUP_BASE_DEPTH=12
 MUP_BASE_HEAD_DIM=64
-CKPT_BASE="${CKPT_BASE:-/ocean/projects/cis260095p/ymiao6/scaling/slowrun/checkpoints}"
+# cis260161p is the only allocation with room (2.8 TB free on 2026-09-09; cis260095p has
+# ~70 GB and cis260009p access is revoked). Per-epoch ckpts for the ensemble block are
+# ~150 GB per cell; everything else keeps only its resume ckpts.
+CKPT_BASE="${CKPT_BASE:-/ocean/projects/cis260161p/ymiao6/scaling/slowrun/checkpoints}"
 
 # Wall-time per cell: measured full-run time on H100 x ~1.3, rounded up.
 # Cells not yet run are extrapolated from  t = 0.9h + L * t_W  with
