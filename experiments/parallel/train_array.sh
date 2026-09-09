@@ -94,6 +94,10 @@ fi
 if [ -n "${WEIGHT_DECAY:-}" ]; then
     EXTRA_FLAGS+=(--weight-decay=$WEIGHT_DECAY)
 fi
+# KEEP_EPOCH_CKPTS_EVERY=K -> prune older per-epoch ckpts on the fly, keeping every K-th
+if [ "${KEEP_EPOCH_CKPTS_EVERY:-0}" -gt 0 ] 2>/dev/null; then
+    EXTRA_FLAGS+=(--keep-epoch-ckpts-every=$KEEP_EPOCH_CKPTS_EVERY)
+fi
 
 # --- Map array index to (strategy, model_idx) ---
 STRATEGY_IDX=$((SLURM_ARRAY_TASK_ID / NUM_MODELS))

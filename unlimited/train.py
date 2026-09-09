@@ -141,6 +141,12 @@ parser.add_argument("--checkpoint-every-n-steps", type=int, default=0,
                     help="If >0, save model_{i}_step_{S}.pt every N optimizer steps in single-model "
                          "mode. Used for finer-grained replay-time ensemble eval. Saved in addition "
                          "to per-epoch checkpoints. 0 = disabled (default).")
+parser.add_argument("--keep-epoch-ckpts-every", type=int, default=0,
+                    help="If K>0, after writing model_{i}_epoch_{k}.pt delete this model's OLDER "
+                         "epoch checkpoints whose epoch is not a multiple of K. The newest one is "
+                         "always kept (resume), every K-th is kept permanently. Bounds the on-disk "
+                         "footprint of single-model runs that will never be ensembled. "
+                         "0 = keep everything (default).")
 args = parser.parse_args()
 
 assert 0.0 < args.data_fraction <= 1.0, "--data-fraction must be in (0, 1]"
@@ -1636,6 +1642,32 @@ def train_single_model(model_idx, seed, device, config, autocast_ctx, token_byte
 # Synchronized ensemble training (our additions)
 # =============================================================================
 
+def prune_epoch_ckpts(checkpoint_dir, model_idx, current_epoch, keep_every):
+    """Delete model_{model_idx}_epoch_{k}.pt for k < current_epoch with k % keep_every != 0.
+
+    Only this model's files, only strictly older epochs, only the epoch_ pattern --
+    step checkpoints and other models are never touched. Returns the deleted paths.
+    """
+    if keep_every <= 0:
+        return []
+    import re as _re
+    pat = _re.compile(rf"^model_{model_idx}_epoch_(\d+)\.pt$")
+    deleted = []
+    for name in os.listdir(checkpoint_dir):
+        m = pat.match(name)
+        if not m:
+            continue
+        k = int(m.group(1))
+        if k < current_epoch and k % keep_every != 0:
+            path = os.path.join(checkpoint_dir, name)
+            try:
+                os.remove(path)
+                deleted.append(path)
+            except OSError as e:
+                print(f"  [prune] could not remove {path}: {e}")
+    return deleted
+
+
 def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                         wandb_run, ddp, ddp_world_size, checkpoint_dir,
                         num_epochs, ensemble_type, ensemble_mode,
@@ -2031,6 +2063,11 @@ def train_ensemble_sync(seeds, device, config, autocast_ctx, token_bytes,
                     continue
                 ckpt_path = os.path.join(checkpoint_dir, f"model_{i}_epoch_{epoch}.pt")
                 torch.save(models[i].state_dict(), ckpt_path)
+                if args.keep_epoch_ckpts_every > 0:
+                    _gone = prune_epoch_ckpts(checkpoint_dir, i, epoch, args.keep_epoch_ckpts_every)
+                    if _gone:
+                        print0(f"  [prune] model {i}: removed {len(_gone)} older epoch ckpt(s), "
+                               f"keeping every {args.keep_epoch_ckpts_every}th and epoch {epoch}")
             # Save progress summary
             progress = {
                 "seeds": seeds,

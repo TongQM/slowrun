@@ -25,9 +25,10 @@
 #   dyn_ens226  4 individuals (init_shuffle) at the matched-size pair L6/W1536 and
 #               L24/W768 (both 226M), per-epoch ckpts, fused replay E in {2,3,4}.
 #               Model 0 of each doubles as that cell's E=1 curve.
+#   dyn_e1      = dyn_rerun + dyn_fill + dyn_p20 (every single-model dynamics run)
 #   dyn_p20     7-cell lambda=0 constant-LR ladder at P=20M (df=0.2, 50 epochs,
-#               val every 38 steps = 0.25 epoch): the second corpus size for the
-#               floor-vs-data question.
+#               val every 152 steps = the 100M runs' 19.9M-token grid, i.e. one
+#               epoch here): the second corpus size for the floor-vs-data question.
 #   cap_lambda  post-fix lambda-transfer check, cooldown ON, lambda in {0.15,0.3}
 #               at d6/768, d48/768, d12/1536
 #   cap_grid    tuned-lambda cooldown grid at ONE lambda (WD=..., decide after
@@ -61,6 +62,8 @@ MUP_BASE_HEAD_DIM=64
 # ~70 GB and cis260009p access is revoked). Per-epoch ckpts for the ensemble block are
 # ~150 GB per cell; everything else keeps only its resume ckpts.
 CKPT_BASE="${CKPT_BASE:-/ocean/projects/cis260161p/ymiao6/scaling/slowrun/checkpoints}"
+STEP_CKPT_EVERY="${STEP_CKPT_EVERY:-152}"   # ensemble cells: 152 = existing 19.9M-token grid; 304 halves the transient
+KEEP_EPOCH_EVERY="${KEEP_EPOCH_EVERY:-5}"   # single-model cells: prune older epoch ckpts on the fly, keep every 5th
 
 # Wall-time per cell: measured full-run time on H100 x ~1.3, rounded up.
 # Cells not yet run are extrapolated from  t = 0.9h + L * t_W  with
@@ -121,6 +124,7 @@ dyn_single() {  # tag  "L:W L:W ..."
         local exp; exp=$(common_exports "$L" "$W")
         exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
         exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
+        exp+=",KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
         [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
         local su; su=$(su_est "$L" "$W"); TOTAL_SU=$((TOTAL_SU + su))
         echo "  d${L}/w${W}  lambda=0 constant-LR 40ep  model 0   ~${su} SU  $(walltime "$L" "$W")"
@@ -130,26 +134,40 @@ dyn_single() {  # tag  "L:W L:W ..."
 }
 
 # ------------------------------------------------------------------ dynamics, ensembles
-dyn_ensemble() {  # "L:W ..."  -> 4 init_shuffle individuals + fused replay
-    local cells=$1 L W
+# Storage plan for each ensemble cell (transient = step ckpts, which replay consumes):
+#   train    4 init_shuffle individuals, per-epoch ckpts (kept) + step ckpts every
+#            STEP_CKPT_EVERY steps (152 = the 19.9M-token grid of the existing four
+#            ensemble cells; 304 halves the transient and lands on every other point)
+#   replay   fused, E in {2,3,4}, at STEP resolution -> the ensemble curve
+#   cleanup  step ckpts pruned to every 5th (PERMANENT stride = 5 x cadence, i.e. every
+#            100M tokens at cadence 152); ALL per-epoch ckpts kept -- they are the
+#            source for any future replay at epoch resolution.
+#   The second cell's training waits for the first cell's cleanup, so only one
+#   cell's transient is ever on disk. At cadence 152 that peak is ~960 GB.
+dyn_ensemble() {  # "L:W ..."  -> 4 init_shuffle individuals + fused replay + cleanup, chained
+    local cells=$1 L W dep=""
+    local perm=$((STEP_CKPT_EVERY * 5))
     for c in $cells; do
         L=${c%%:*}; W=${c##*:}
         local ts="${GRID_TAG}_ens_d${L}_w${W}"
         local exp; exp=$(common_exports "$L" "$W")
         exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
-        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
-        exp+=",ENS_SIZES_STR=2 3 4,SKIP_INDIV_VAL=1,END_EPOCH=40,EVAL_MODE=epoch"
+        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=$STEP_CKPT_EVERY"
+        exp+=",ENS_SIZES_STR=2 3 4,SKIP_INDIV_VAL=1,END_EPOCH=40,EVAL_MODE=step"
+        exp+=",PERMANENT_EVERY_N_STEPS=$perm,PERMANENT_EVERY_N_EPOCHS=1"
         [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_shuffle_ens_${ts}"
         local su; su=$(( $(su_est "$L" "$W") * 4 )); TOTAL_SU=$((TOTAL_SU + su))
         # array tasks NUM_MODELS..NUM_MODELS+3 = init_shuffle models 0..3
         local arr="${NUM_MODELS}-$((NUM_MODELS + 3))"
-        echo "  d${L}/w${W}  lambda=0 constant-LR 40ep  init_shuffle models 0-3   ~${su} SU  $(walltime "$L" "$W")"
-        TJOB=$(submit "al_ens_d${L}_w${W}" "$(walltime "$L" "$W")" "$arr" "$exp")
+        echo "  d${L}/w${W}  lambda=0 constant-LR 40ep  init_shuffle models 0-3  step ckpts every $STEP_CKPT_EVERY   ~${su} SU  $(walltime "$L" "$W")"
+        TJOB=$(submit "al_ens_d${L}_w${W}" "$(walltime "$L" "$W")" "$arr" "$exp" "$dep")
         # replay_fused.py drops any epoch missing a ckpt for ANY of num_models, so the
         # replay is told 4 (models 0-3 exist); training keeps NUM_MODELS=5 for seed parity.
         local rexp; rexp=$(echo "$exp" | sed "s/NUM_MODELS=$NUM_MODELS,/NUM_MODELS=4,/")
-        RJOB=$(submit "al_ensreplay_d${L}_w${W}" "06:00:00" 1 "$rexp" "--dependency=afterok:$TJOB" experiments/parallel/replay_array_fused.sh)
-        echo "    train job=$TJOB   replay job=$RJOB (after train; init_shuffle, E in {2,3,4})"
+        RJOB=$(submit "al_ensreplay_d${L}_w${W}" "10:00:00" 1 "$rexp" "--dependency=afterok:$TJOB" experiments/parallel/replay_array_fused.sh)
+        CJOB=$(submit "al_ensclean_d${L}_w${W}" "00:30:00" 1 "$exp" "--dependency=afterok:$RJOB" experiments/parallel/cleanup_array.sh)
+        echo "    train job=$TJOB${dep:+ ($dep)}   replay job=$RJOB (after train)   cleanup job=$CJOB (after replay; keeps step%${perm}==0 and every epoch)"
+        dep="--dependency=afterok:$CJOB"
     done
 }
 
@@ -160,9 +178,12 @@ dyn_p20() {
         L=${c%%:*}; W=${c##*:}
         local ts="${GRID_TAG}_p20_d${L}_w${W}"
         local exp; exp=$(common_exports "$L" "$W")
-        # df=0.2 -> 19.99M tokens/epoch, 152.5 steps/epoch; 50 epochs = 1B tokens (1/4 of a 100M run)
+        # df=0.2 -> 19.99M tokens/epoch, 152.5 steps/epoch; 50 epochs = 1B tokens (1/4 of a 100M run).
+        # Val every 152 steps = 19.9M tokens: the SAME tokens-seen grid as the 100M runs
+        # (one epoch here, a fifth of an epoch there). Resolution aligns on tokens, not epochs.
         exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=50,DATA_FRACTION=0.2"
-        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=38,CHECKPOINT_EVERY_N_STEPS=0"
+        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
+        exp+=",KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
         [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
         local su; su=$(( ( $(su_est "$L" "$W") + 3 ) / 4 )); TOTAL_SU=$((TOTAL_SU + su))
         local h; h=$(( ( ${walltime_h:-0} ) )); local tl; tl=$(walltime "$L" "$W"); tl=$(printf "%02d:00:00" $(( (10#${tl%%:*} + 3) / 4 + 1 )))
@@ -217,6 +238,7 @@ run_block() {
                     dyn_ensemble "6:1536 24:768";;
         dyn_p20)    echo "== dyn_p20: lambda=0 constant-LR ladder at P=20M =="
                     dyn_p20;;
+        dyn_e1)     run_block dyn_rerun; run_block dyn_fill; run_block dyn_p20;;
         cap_lambda) echo "== cap_lambda: post-fix lambda-transfer check, cooldown ON =="
                     cap_cells cap "6:768 48:768 12:1536" "0.15 0.3";;
         cap_grid)   : "${WD:?set WD=<lambda> for cap_grid (decide after cap_lambda)}"
