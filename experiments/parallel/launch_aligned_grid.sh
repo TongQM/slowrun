@@ -25,6 +25,9 @@
 #   dyn_ens226  4 individuals (init_shuffle) at the matched-size pair L6/W1536 and
 #               L24/W768 (both 226M), per-epoch ckpts, fused replay E in {2,3,4}.
 #               Model 0 of each doubles as that cell's E=1 curve.
+#   dyn_ens_d6  same recipe at L6/W768 and L6/W384: the two pre-fix ensemble cells
+#               behind Figure 8 (their L=12 partners are unaffected by the fix).
+#               Chain it behind dyn_ens226 with AFTER_JOB=<its last cleanup job>.
 #   dyn_e1      = dyn_rerun + dyn_fill + dyn_p20 (every single-model dynamics run)
 #   dyn_p20     7-cell lambda=0 constant-LR ladder at P=20M (df=0.2, 50 epochs,
 #               val every 152 steps = the 100M runs' 19.9M-token grid, i.e. one
@@ -149,7 +152,9 @@ dyn_single() {  # tag  "L:W L:W ..."
 #   The second cell's training waits for the first cell's cleanup, so only one
 #   cell's transient is ever on disk. At cadence 152 that peak is ~960 GB.
 dyn_ensemble() {  # "L:W ..."  -> 4 init_shuffle individuals + fused replay + cleanup, chained
-    local cells=$1 L W dep=""
+    # AFTER_JOB=<jobid> gates the first cell's training on an existing job (e.g. the
+    # previous ensemble chain's cleanup) so transients never overlap on disk.
+    local cells=$1 L W dep="${AFTER_JOB:+--dependency=afterok:$AFTER_JOB}"
     local perm=$((STEP_CKPT_EVERY * 5))
     for c in $cells; do
         L=${c%%:*}; W=${c##*:}
@@ -224,6 +229,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_rerun)  for c in 6:384 6:768 6:1152 18:768 48:768 60:768; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_fill)   for c in 18:384 18:1152 18:1536 24:384 24:1152 24:1536; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_ens226) for c in 6:1536 24:768; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
+        dyn_ens_d6) for c in 6:384 6:768; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_p20)    for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) + 3) / 4)); done;;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
@@ -240,6 +246,8 @@ run_block() {
                     dyn_single dyn "18:384 18:1152 18:1536 24:384 24:1152 24:1536";;
         dyn_ens226) echo "== dyn_ens226: 4 init_shuffle individuals at the 226M matched-size pair =="
                     dyn_ensemble "6:1536 24:768";;   # d6/w1536 first: larger transient while disk is emptiest
+        dyn_ens_d6) echo "== dyn_ens_d6: re-run the two pre-fix L=6 ensemble cells behind Figure 8 =="
+                    dyn_ensemble "6:768 6:384";;
         dyn_p20)    echo "== dyn_p20: lambda=0 constant-LR ladder at P=20M =="
                     dyn_p20;;
         dyn_e1)     run_block dyn_rerun; run_block dyn_fill; run_block dyn_p20
@@ -256,7 +264,7 @@ run_block() {
 echo "GRID_TAG=$GRID_TAG  account=$ACCOUNT  ckpt=$CKPT_BASE  DRY_RUN=$DRY_RUN"
 if [ "$BLOCK" = "plan" ]; then
     DRY_RUN=1; QUIET=1
-    for b in dyn_rerun dyn_fill dyn_ens226 dyn_p20 cap_lambda; do
+    for b in dyn_rerun dyn_fill dyn_ens226 dyn_ens_d6 dyn_p20 cap_lambda; do
         run_block "$b" | grep -v "job="
         TOTAL_SU=$((TOTAL_SU + $(block_su "$b")))
         echo "   -> ~$(block_su "$b") SU"
