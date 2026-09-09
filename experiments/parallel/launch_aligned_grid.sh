@@ -62,7 +62,11 @@ MUP_BASE_HEAD_DIM=64
 # ~70 GB and cis260009p access is revoked). Per-epoch ckpts for the ensemble block are
 # ~150 GB per cell; everything else keeps only its resume ckpts.
 CKPT_BASE="${CKPT_BASE:-/ocean/projects/cis260161p/ymiao6/scaling/slowrun/checkpoints}"
-STEP_CKPT_EVERY="${STEP_CKPT_EVERY:-152}"   # ensemble cells: 152 = existing 19.9M-token grid; 304 halves the transient
+# Ensemble step-ckpt cadence. 152 = the existing ensemble cells' 19.9M-token grid, but at
+# that cadence one cell's transient is ~0.9-1.1 TB against 1.15 TB free (hard quota, 2026-09-09)
+# and nothing on disk may be deleted. 304 (39.8M tokens) halves the transient to 510-640 GB
+# and every point still coincides with an existing point (every other one).
+STEP_CKPT_EVERY="${STEP_CKPT_EVERY:-304}"
 KEEP_EPOCH_EVERY="${KEEP_EPOCH_EVERY:-5}"   # single-model cells: prune older epoch ckpts on the fly, keep every 5th
 
 # Wall-time per cell: measured full-run time on H100 x ~1.3, rounded up.
@@ -235,10 +239,11 @@ run_block() {
         dyn_fill)   echo "== dyn_fill: new lambda=0 cells at L=18, 24 =="
                     dyn_single dyn "18:384 18:1152 18:1536 24:384 24:1152 24:1536";;
         dyn_ens226) echo "== dyn_ens226: 4 init_shuffle individuals at the 226M matched-size pair =="
-                    dyn_ensemble "6:1536 24:768";;
+                    dyn_ensemble "6:1536 24:768";;   # d6/w1536 first: larger transient while disk is emptiest
         dyn_p20)    echo "== dyn_p20: lambda=0 constant-LR ladder at P=20M =="
                     dyn_p20;;
-        dyn_e1)     run_block dyn_rerun; run_block dyn_fill; run_block dyn_p20;;
+        dyn_e1)     run_block dyn_rerun; run_block dyn_fill; run_block dyn_p20
+                    BLOCK_SU=$(( $(block_su dyn_rerun) + $(block_su dyn_fill) + $(block_su dyn_p20) ));;
         cap_lambda) echo "== cap_lambda: post-fix lambda-transfer check, cooldown ON =="
                     cap_cells cap "6:768 48:768 12:1536" "0.15 0.3";;
         cap_grid)   : "${WD:?set WD=<lambda> for cap_grid (decide after cap_lambda)}"
