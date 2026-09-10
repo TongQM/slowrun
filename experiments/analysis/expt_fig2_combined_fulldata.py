@@ -28,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-REPO = "/ocean/projects/cis260161p/ymiao6/scaling/slowrun"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, by convention
 LOGS = os.path.join(REPO, "experiments/logs")
 BATCH = 131072
 NUM_MODELS = 5
@@ -37,7 +37,7 @@ BASE_W = 768
 # per-(model,epoch) shuffle (the more-diverse, stronger-ensembling strategy).
 STRAT = "init_shuffle"          # "init" or "init_shuffle"
 STRAT_SIDX = {"init": 0, "init_shuffle": 1}
-ENS_SIZES = [2, 3, 4, 5]
+ENS_SIZES = [2, 3, 4]      # capped at 4: the largest width in the sweep is 4x compute, so E=5 would have no partner
 WIDTHS = [384, 768, 1152, 1536]
 ENS_LINE = re.compile(r"\[step \d+ ens=([2-5])\] val_loss=([\d.]+) val_bpb=[\d.]+ tokens=(\d+)")
 IND_LINE = re.compile(r"\[model \d+ val @ step (\d+)\] val_loss=([\d.]+)")
@@ -119,7 +119,7 @@ def main():
     # E=1 (mean of individuals at base width) and the ensembles
     base_indiv = indiv_curves_for_width(BASE_W)
     g1, v1 = mean_indiv_curve(base_indiv)
-    ens = ensemble_curves()
+    ens = {E: c for E, c in ensemble_curves().items() if E <= max(ENS_SIZES)}
     E_present = [1] + sorted(ens)
     palette = sns.color_palette("cool", len(E_present))
 

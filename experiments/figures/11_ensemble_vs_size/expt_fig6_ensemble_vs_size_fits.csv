@@ -3,6 +3,18 @@ E1_collapsed,form,floor-free L*=A*N_M^-beta,18 cells
 E1_collapsed,A,4.239455,
 E1_collapsed,beta,0.016594,
 E1_collapsed,R2,0.941839,
+E2_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
+E2_law,A,4.182352,
+E2_law,beta,0.018844,
+E2_law,R2,0.856525,
+E3_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
+E3_law,A,4.121240,
+E3_law,beta,0.017532,
+E3_law,R2,0.840274,
+E4_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
+E4_law,A,4.114470,
+E4_law,beta,0.017834,
+E4_law,R2,0.868300,
 E4_H1_shift,Delta,0.139290,lower floor same excess; SSE=0.003296
 E4_H2_prefactor,rho,0.964077,same floor smaller excess; SSE=0.003384
 E4_shared_floor,c,4.114470,two-parameter; SSE=0.003252

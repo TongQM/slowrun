@@ -36,16 +36,18 @@ DEPTHS = [6, 12, 18, 24, 48, 60]   # d48=4x, d60=5x complete the E=4/E=5 matched
 
 def indiv_curves_for_depth(L):
     """List of (steps, val) per individual for d{L}/w768.
-    L in {6,12}: the 5 init_shuffle individuals (fd_train). L in {18,24}: single
-    init model from the grid-fill (fd_gridfill, task 0)."""
+    L=12: the 5 init_shuffle individuals of the base cell (unaffected by the
+    residual-path correction). Every other depth: model 0 of the ALIGNED grid
+    (expt_cells.ALIGNED_CELLS), i.e. the post-correction run."""
+    from expt_cells import ALIGNED_CELLS
     curves = []
-    if L in (6, 12):
+    if L == 12:
         sidx = STRAT_SIDX[STRAT]
         for m in range(NUM_MODELS):
             task = sidx * NUM_MODELS + m
             d = {}
             for f in sorted(glob.glob(f"{LOGS}/fd_train_d{L}_w768_*_{task}.out")):
-                with open(f) as fh:
+                with open(f, errors="ignore") as fh:
                     for line in fh:
                         mm = IND_LINE.search(line)
                         if mm:
@@ -53,10 +55,10 @@ def indiv_curves_for_depth(L):
             if d:
                 s = np.array(sorted(d))
                 curves.append((s, np.array([d[k] for k in s])))
-    else:  # grid-fill depth cells: single init model (task 0)
+    else:
         d = {}
-        for f in sorted(glob.glob(f"{LOGS}/fd_gridfill_d{L}_w768_*_0.out")):
-            with open(f) as fh:
+        for f in sorted(glob.glob(f"{LOGS}/{ALIGNED_CELLS[(L, 768)]}")):
+            with open(f, errors="ignore") as fh:
                 for line in fh:
                     mm = IND_LINE.search(line)
                     if mm:

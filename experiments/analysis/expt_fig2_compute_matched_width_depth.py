@@ -76,10 +76,13 @@ def main():
 
     fig, (axW, axD) = plt.subplots(1, 2, figsize=(20, 8), sharey=True)
 
-    def add_ensemble(ax):
-        ax.plot(ex, ey, "s-", color=mag, lw=3.0, ms=12, markeredgecolor="black",
-                markeredgewidth=0.6, label=r"ensemble ($d=12$, $w=768$)")
-        for E, x, y in zip(Es, ex, ey):
+    def add_ensemble(ax, max_E=5):
+        # the width panel stops at E=4 (its largest single model is 4x compute); the depth
+        # panel keeps E=5 because d60 is its 5x partner
+        sel = [(E, x, y) for E, x, y in zip(Es, ex, ey) if E <= max_E]
+        ax.plot([t[1] for t in sel], [t[2] for t in sel], "s-", color=mag, lw=3.0, ms=12,
+                markeredgecolor="black", markeredgewidth=0.6, label=r"ensemble ($d=12$, $w=768$)")
+        for E, x, y in sel:
             ax.annotate(f"E={E}", (x, y), textcoords="offset points", xytext=(6, 8),
                         fontsize=13, ha="left", color=mag)
 
@@ -102,7 +105,7 @@ def main():
         off, ha = ((-10, -16), "right") if w == 1536 else ((0, -18), "center")
         axW.annotate(f"w={w}", (x, y), textcoords="offset points", xytext=off,
                      fontsize=13, ha=ha, color=cyan)
-    add_ensemble(axW)
+    add_ensemble(axW, max_E=4)
     if 1536 in Lstar_w and 4 in Lstar_ens:
         add_delta(axW, 4.0, Lstar_w[1536], Lstar_ens[4])
     axW.set_xscale("log")

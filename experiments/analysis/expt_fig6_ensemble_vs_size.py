@@ -58,7 +58,7 @@ REPO = HERE.parents[1]
 ENS_CSV = REPO / "data_export" / "100M_data" / "val_loss_ensembles.csv"
 OUTDIR = REPO / "experiments" / "figures" / "11_ensemble_vs_size"
 STRAT = "init_shuffle_ens"          # the strategy the paper now foregrounds
-E_SHOW = (2, 3, 4, 5)
+E_SHOW = (2, 3, 4)          # capped at 4, the largest ensemble size trained at every cell
 
 
 def load_ensembles():
@@ -147,33 +147,40 @@ def main():
                                 advantage=v["l_star"] - r["l_star"]))
 
     # ------------------------------------------------------------- figure (single panel)
-    # Each replicated cell draws its own ensemble curve E=1..5 at effective size E*N,
-    # starting on the single-model law -- the construction of Figure 2B, one curve per
-    # base cell -- so the reader sees five short "ensembling branches" leaving the law.
+    # Points coloured by ensemble size; each E gets its own floor-free power-law fit
+    # across the replicated cells, drawn and labelled with its exponent, so "same law
+    # shifted down" (parallel lines) vs "steeper law" (converging lines) is read off
+    # directly. Thin grey connectors still show which points come from one base cell.
     fig, ax = plt.subplots(figsize=(11, 7.6))
-    ax.scatter(N1, L1, s=150, color="0.25", edgecolor="black", linewidth=0.9, zorder=4,
-               label=f"single model ($E$=1), {len(N1)} cells")
-    gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max() * 1.25)), 300)
-    ax.plot(gN, fit1(gN), "k--", lw=2.6, zorder=2, label=fr"single-model law  $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$")
-    ax.plot(gN, fit1(gN) - Delta, color="0.55", ls=":", lw=2.6, zorder=2,
-            label=fr"law shifted down by {Delta:.2f} (mean gap at $E$=4, the largest $E$ all cells share)")
-    pal_cells = sns.color_palette("cool", len(cells_E))
-    for col, (L, W) in zip(pal_cells, cells_E):
+    for (L, W) in cells_E:
         rr = sorted([r for r in rows if (r["L"], r["W"]) == (L, W)], key=lambda r: r["E"])
         xs = [single[(L, W)]["N"]] + [r["N_eff"] for r in rr]
         ys = [single[(L, W)]["l_star"]] + [r["l_star"] for r in rr]
-        ax.plot(xs, ys, "-", color=col, lw=2.4, zorder=3)
-        ax.scatter(xs[1:], ys[1:], s=75, color=col, edgecolor="black", linewidth=0.6, zorder=5)
+        ax.plot(xs, ys, "-", color="0.75", lw=1.3, zorder=1)
         ax.annotate(fr"$L${L}/$W${W}", xy=(xs[0], ys[0]), xytext=(-6, 6), textcoords="offset points",
-                    fontsize=11, color=col, ha="right")
-    ax.scatter([], [], s=60, color="0.5", edgecolor="black", linewidth=0.5, label="ensemble of that cell at $E\cdot N$, $E$=2,3,4(,5)")
+                    fontsize=11, color="0.35", ha="right")
+    ax.scatter(N1, L1, s=150, color="0.25", edgecolor="black", linewidth=0.9, zorder=4)
+    gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max() * 1.25)), 300)
+    ax.plot(gN, fit1(gN), "--", color="0.15", lw=2.6, zorder=2,
+            label=fr"$E$=1 ({len(N1)} cells):  $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$")
+    col_E = {E: c for E, c in zip(E_SHOW, sns.color_palette("cool", len(E_SHOW)))}
+    per_E = {}
+    for E in E_SHOW:
+        rr = [r for r in rows if r["E"] == E]
+        xe = np.array([r["N_eff"] for r in rr], float); ye = np.array([r["l_star"] for r in rr], float)
+        ax.scatter(xe, ye, s=110, color=col_E[E], edgecolor="black", linewidth=0.7, zorder=5)
+        A_E, b_E, r2_E = powerlaw_fit(xe / 1e6, ye)
+        per_E[E] = (A_E, b_E, r2_E, len(rr))
+        ge = np.logspace(np.log10(xe.min() / 1.3), np.log10(xe.max() * 1.3), 100)
+        ax.plot(ge, A_E * (ge / 1e6) ** (-b_E), "--", color=col_E[E], lw=2.2, zorder=3,
+                label=fr"$E$={E} ({len(rr)} cells):  $\mathcal{{L}}^*\propto (EN)^{{-{b_E:.3f}}}$")
     ax.set_xscale("log")
     ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8, 1e9]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M" if x < 1e9 else f"{x/1e9:g}B"))
     ax.xaxis.set_minor_formatter(plt.NullFormatter())
     ax.set_xlabel(r"effective size  $E\cdot N$   (parameters $\times$ ensemble size)", fontsize=20)
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$", fontsize=22)
-    ax.set_title("Ensembling against model size: each branch is one cell's ensemble series", fontsize=16, loc="left")
-    ax.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=12)
+    ax.set_title("Ensembling against model size: one fitted law per ensemble size", fontsize=16, loc="left")
+    ax.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=13)
     for ext in ("pdf", "png"):
         p = OUTDIR / f"expt_fig6_ensemble_vs_size.{ext}"
         fig.savefig(p, bbox_inches="tight", dpi=300)
@@ -192,6 +199,9 @@ def main():
         fh.write("model,param,value,note\n")
         fh.write(f"E1_collapsed,form,floor-free L*=A*N_M^-beta,{len(N1)} cells\nE1_collapsed,A,{c1:.6f},\n"
                  f"E1_collapsed,beta,{a1:.6f},\nE1_collapsed,R2,{r2_1:.6f},\n")
+        for E, (A_E, b_E, r2_E, nE) in per_E.items():
+            fh.write(f"E{E}_law,form,floor-free L*=A*(EN)_M^-beta,{nE} cells\nE{E}_law,A,{A_E:.6f},\n"
+                     f"E{E}_law,beta,{b_E:.6f},\nE{E}_law,R2,{r2_E:.6f},\n")
         fh.write(f"E4_H1_shift,Delta,{Delta:.6f},lower floor same excess; SSE={sse_H1:.6f}\n")
         fh.write(f"E4_H2_prefactor,rho,{rho:.6f},same floor smaller excess; SSE={sse_H2:.6f}\n")
         fh.write(f"E4_shared_floor,c,{c4:.6f},two-parameter; SSE={sse_2p:.6f}\n")
@@ -206,7 +216,10 @@ def main():
     for r in rows:
         print(f"L{r['L']}/W{r['W']:<5} {r['N']/1e6:>5.0f}M {r['E']:>2} {r['N_eff']/1e6:>5.0f}M "
               f"{r['l_star']:>8.4f} {r['fit1_at_Neff']:>8.4f} {r['gap']:>7.4f} {r['ep_star']:>5.1f}")
-    print(f"\nE=4 vs the E=1 law (4 points):")
+    print("\nper-E floor-free laws across the replicated cells:")
+    for E, (A_E, b_E, r2_E, nE) in per_E.items():
+        print(f"  E={E}: L* = {A_E:.4f} (EN)_M^-{b_E:.4f}  R2={r2_E:.3f}  ({nE} cells)")
+    print(f"\nE=4 vs the E=1 law ({len(r4)} points):")
     print(f"  H1 shift down          Delta={Delta:.4f}   SSE={sse_H1:.5f}")
     print(f"  H2 prefactor on excess rho={rho:.4f}     SSE={sse_H2:.5f}")
     print(f"  shared-floor 2-param   alpha_E4={a4:.3f} (E=1: {a1:.3f})  c={c4:.3f} (E=1: {c1:.3f})  SSE={sse_2p:.5f}")
