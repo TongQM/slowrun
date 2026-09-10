@@ -147,8 +147,18 @@ Storage (hard quota 3.906 TB, 1.147 TB free at launch, nothing pre-existing dele
 Resolution rule: align on **tokens seen**, not epochs. At P=20M, 152 steps is one epoch; at P=100M
 it is a fifth. Ensemble points at cadence 304 coincide with every other existing ensemble point.
 
-The **capacity regime** (tuned lambda, cooldown ON; attainable loss only, no stopping time) is the
-`cap_lambda` / `cap_grid` blocks of the same launcher, not yet launched (~124 + ~191 SU).
+The **capacity regime** (tuned lambda, cooldown ON; attainable loss only, no stopping time) was
+launched 2026-09-10 from the same launcher, tag `aligned_20260910`:
+
+| Block | Cells | Jobs | SU |
+|---|---|---|---|
+| `cap_lambda` | lambda in {0.15, 0.3} at d6/768, d48/768, d12/1536 | 45709989-94 | ~124 |
+| `cap_grid` | lambda=0.2 over the 12 cells (4x4 minus the d18/d24 fills, plus d48, d60) | 45709995-45710006 | ~191 |
+
+Together the three `cap_lambda` cells get a {0.15, 0.2, 0.3} sweep each (transfer check across
+depth 6-48 and width 768-1536 after the residual-path correction) and the grid sits at 0.2, the most
+common pre-correction optimum. Single-model, per-epoch ckpts pruned on the fly (keep every 5th).
+Pre-correction tuned-lambda column (`wdsize_*`, `wdfill_*`) is superseded for every depth but 12.
 
 ### Grid 3: TBD (post-Q1/Q2)
 
