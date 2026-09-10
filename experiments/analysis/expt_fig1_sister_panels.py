@@ -259,8 +259,9 @@ def write_latex_table(fits, path, n_cells=18):
 \begin{table}[t]
   \centering
   \caption{Fitted exponents for the multi-epoch optimal-stopping and attainable-loss
-  relations. Model-size rows use the 18 cells at $P{=}100$M ($\lambda{=}0$, constant LR,
-  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The depth
+  relations. Rows in $N$ use the 18 grid cells at $P{=}100$M ($\lambda{=}0$, constant LR,
+  $E{=}1$), one point per cell; rows in $P$ use the ten corpus sizes at $L{=}12,W{=}768$,
+  one point per corpus size with the two ensembling strategies averaged. The depth
   ladder is the $W{=}768$ column of Figure~\ref{fig:datasize_sweep}D and the width ladder
   the $L{=}12$ row of Figure~\ref{fig:datasize_sweep}E; at fixed width the exponent in $N$
   is also the exponent in $L$, and at fixed depth the exponent in $W$ is twice the one in
@@ -271,21 +272,21 @@ def write_latex_table(fits, path, n_cells=18):
   \label{tab:stopping_exponents}
   \begin{tabular}{llccc}
     \toprule
-    Quantity & Fitted form & Exponent & $R^2$ & Cells \\
+    Quantity & Fitted form & Exponent & $R^2$ & Points \\
     \midrule
 """)
-        fh.write(f"    Optimal stopping epoch & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
+        fh.write(f"    Optimal stopping epoch vs $N$ & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_all:.3f}$ & ${r2_all:.3f}$ & {n_cells}" + EOL)
         fh.write(f"    \\quad depth ladder only & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_d:.3f}$ & ${r2_d:.3f}$ & 6" + EOL)
         fh.write(f"    \\quad width ladder only & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_w:.3f}$ & ${r2_w:.3f}$ & 4" + EOL)
-        fh.write(f"    Optimal stopping epoch & $\\mathcal{{E}}^\\ast \\propto P^{{-\\alpha}}$"
-                 f" & ${a_P:.3f}$ & ${r2_P:.3f}$ & 20" + EOL)
+        fh.write(f"    Optimal stopping epoch vs $P$ & $\\mathcal{{E}}^\\ast \\propto P^{{-\\alpha}}$"
+                 f" & ${a_P:.3f}$ & ${r2_P:.3f}$ & 10" + EOL)
         fh.write("    \\midrule\n")
-        fh.write(f"    Min val loss & $\\mathcal{{L}}^\\ast \\propto N^{{-\\beta_N}}$"
+        fh.write(f"    Min val loss vs $N$ & $\\mathcal{{L}}^\\ast \\propto N^{{-\\beta_N}}$"
                  f" & ${aN:.3f}$ & ${r2_LN:.3f}$ & {n_cells}" + EOL)
-        fh.write(f"    Min val loss & $\\mathcal{{L}}^\\ast \\propto P^{{-\\beta_P}}$"
+        fh.write(f"    Min val loss vs $P$ & $\\mathcal{{L}}^\\ast \\propto P^{{-\\beta_P}}$"
                  f" & ${aP_:.3f}$ & ${r2_LP:.3f}$ & 10" + EOL)
         fh.write(r"""    \bottomrule
   \end{tabular}
@@ -384,7 +385,12 @@ def main():
     nad_ep = np.concatenate([nadir_per_strat[s]["ep"] for s in STRAT_MARKER])
     nad_steps = np.concatenate([nadir_per_strat[s]["tok"] for s in STRAT_MARKER]) / BATCH_SIZE
     nad_P = np.concatenate([nadir_per_strat[s]["P"] for s in STRAT_MARKER])
-    A_P, a_P, r2_P = powerlaw_fit(nad_P, nad_ep)
+    # fit on the strategy-averaged nadir epoch per corpus size (10 points), the same
+    # treatment as the loss law, so the two P rows of the table have the same n
+    _Pu = np.array(sorted(set(nad_P)))
+    _epu = np.array([nad_ep[nad_P == P_].mean() for P_ in _Pu])
+    A_P, a_P, r2_P = powerlaw_fit(_Pu, _epu)
+    n_P = len(_Pu)
     gP = np.logspace(np.log10(nad_P.min()), np.log10(nad_P.max()), 200)
     ax_n.plot(gP, A_P * gP ** (-a_P), "k--", lw=2.5, zorder=2,
               label=fr"fit: $\mathcal{{E}}^\ast\propto P^{{-{a_P:.2f}}}$")
@@ -558,7 +564,7 @@ def main():
                  "L=12 ladder from above, so the subset spread is not a bug signature\n")
         fh.write(f"min_val_loss,all_cells,{len(rows)},L*=A*N_M^-b (floor-free),{cN:.6f},,"
                  f"{aN:.4f},{r2_L:.4f},N in millions; asymptote not identifiable so fixed at 0\n")
-        fh.write(f"nadir_epoch,vs_P_row1,{len(nad_P)},E*=A*P^-a,{A_P:.6g},,{a_P:.4f},{r2_P:.4f},"
+        fh.write(f"nadir_epoch,vs_P_row1,{n_P},E*=A*P^-a,{A_P:.6g},,{a_P:.4f},{r2_P:.4f},"
                  "row 1: dependence on unique tokens at fixed model size\n")
         fh.write(f"min_val_loss,vs_P_row1,{len(P_grid)},L*=A*P_M^-b (floor-free),{cP:.6f},,"
                  f"{aP_:.4f},{r2_LP:.4f},P in millions; same floor-free form as the N law so the "

@@ -4,5 +4,5 @@ nadir_epoch,depth_ladder_W768,6,E*=A*N^-a,3677.02,,0.3223,0.9403,vary L only; at
 nadir_epoch,width_ladder_L12,4,E*=A*N^-a,4622.51,,0.3316,0.9272,vary W only; N ~ W^2 so the exponent in W is 0.6632. Also the only pre-fix-immune subset (12/L=1 at L=12)
 nadir_epoch,width_ladder_L6,4,E*=A*N^-a,4872.52,,0.3328,0.9618,second width ladder, pre-fix-affected; brackets the L=12 ladder from above, so the subset spread is not a bug signature
 min_val_loss,all_cells,18,L*=A*N_M^-b (floor-free),4.239455,,0.0166,0.9418,N in millions; asymptote not identifiable so fixed at 0
-nadir_epoch,vs_P_row1,20,E*=A*P^-a,170.41,,0.1585,0.8567,row 1: dependence on unique tokens at fixed model size
+nadir_epoch,vs_P_row1,10,E*=A*P^-a,170.386,,0.1584,0.9166,row 1: dependence on unique tokens at fixed model size
 min_val_loss,vs_P_row1,10,L*=A*P_M^-b (floor-free),6.790786,,0.1214,0.9959,P in millions; same floor-free form as the N law so the two exponents ARE comparable
