@@ -2,28 +2,27 @@
 \begin{table}[t]
   \centering
   \caption{Fitted exponents for the multi-epoch optimal-stopping and attainable-loss
-  relations. Model-size rows use the 12 cells at $P{=}100$M ($\lambda{=}0$, constant LR,
-  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The two
-  single-axis ladders are fitted separately for symmetry. The $L{=}12$ ladder is also the
-  only subset untouched by the pre-correction CompleteP residual scaling (the depth factor
-  $L_{\mathrm{base}}/L$ is the identity at $L{=}12$), but the $L{=}6$ ladder, which the
-  correction does affect, brackets it from above, so the subset spread of $0.33$--$0.45$
-  reflects sampling over four-point ladders rather than a parameterization artifact.
-  The two attainable-loss fits have very different $\mathcal{L}_\infty$, so their exponents
-  describe approach rates to different asymptotes and should not be compared directly.}
+  relations. Model-size rows use the 18 cells at $P{=}100$M ($\lambda{=}0$, constant LR,
+  $E{=}1$); unique-token rows use the 10 data-size runs at $L{=}12,W{=}768$. The depth
+  ladder is the $W{=}768$ column of Figure~\ref{fig:datasize_sweep}D and the width ladder
+  the $L{=}12$ row of Figure~\ref{fig:datasize_sweep}E; at fixed width the exponent in $N$
+  is also the exponent in $L$, and at fixed depth the exponent in $W$ is twice the one in
+  $N$. All laws are floor-free, $x^{-\beta}$, because the asymptote of
+  $\mathcal{L}_\infty+c\,x^{-\alpha}$ is not identifiable on these ranges
+  (Appendix Figure~\ref{fig:model_size_profile}); in this common form the exponents in $N$
+  and $P$ are directly comparable.}
   \label{tab:stopping_exponents}
-  \begin{tabular}{llcccc}
+  \begin{tabular}{llccc}
     \toprule
-    Quantity & Fitted form & Exponent & floor & $R^2$ & Cells \\
+    Quantity & Fitted form & Exponent & $R^2$ & Cells \\
     \midrule
-    Optimal stopping epoch & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.314$ & -- & $0.938$ & 18 \\
-    \quad depth ladder ($W{=}768$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.322$ & -- & $0.940$ & 6 \\
-    \quad width ladder ($L{=}12$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.332$ & -- & $0.927$ & 4 \\
-    \quad width ladder ($L{=}6$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.333$ & -- & $0.962$ & 4 \\
-    Optimal stopping epoch & $\mathcal{E}^\ast \propto P^{-\alpha}$ & $0.158$ & -- & $0.857$ & 20 \\
+    Optimal stopping epoch & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.314$ & $0.938$ & 18 \\
+    \quad depth ladder only & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.322$ & $0.940$ & 6 \\
+    \quad width ladder only & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.332$ & $0.927$ & 4 \\
+    Optimal stopping epoch & $\mathcal{E}^\ast \propto P^{-\alpha}$ & $0.158$ & $0.857$ & 20 \\
     \midrule
-    Min val loss & $\mathcal{L}^\ast \propto N^{-\beta_N}$ & $0.017$ & -- & $0.942$ & 18 \\
-    Min val loss & $\mathcal{L}^\ast \propto P^{-\beta_P}$ & $0.121$ & -- & $0.996$ & 10 \\
+    Min val loss & $\mathcal{L}^\ast \propto N^{-\beta_N}$ & $0.017$ & $0.942$ & 18 \\
+    Min val loss & $\mathcal{L}^\ast \propto P^{-\beta_P}$ & $0.121$ & $0.996$ & 10 \\
     \bottomrule
   \end{tabular}
 \end{table}
