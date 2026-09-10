@@ -30,10 +30,11 @@ E* ~ P^-0.16) but falls steeply in model size (21 -> 6 epochs over a 64x range,
 E* ~ N^-0.31). Per decade of scaling that is a ~1.4x shrink from data vs a
 ~2.1x shrink from parameters.
 
-Panel F fits each single-axis ladder as well as the joint set. On the corrected
-grid they agree: all 18 cells N^-0.314, depth ladder (W=768) N^-0.322, width
-ladder (L=12) N^-0.332 (= W^-0.66). Before the correction the joint fit sat at
-0.43 above both ladders, a composition artefact of the pre-fix depth cells.
+Besides the joint law in N, a separable fit E* ~ L^-a_L W^-a_W over the same 18
+cells gives a_L=0.34, a_W=0.61 (R2 0.94, no better than N alone); a_W/(2 a_L) =
+0.90, so the stopping time depends on size almost purely through N. The single-
+axis ladders (W=768 column, L=12 row) are still written to the CSV but no longer
+plotted or tabulated: as subsets at one fixed W or L they read as arbitrary.
 
 Every cell in row 2 is post-correction (or on the L=12 row, where the correction
 is the identity), so no exponent here is provisional any more. The pre-fix
@@ -133,6 +134,18 @@ def powerlaw_fit(x, y):
     return float(np.exp(b)), float(-a), float(r2)
 
 
+def separable_powerlaw_fit(L, W, y):
+    """log y = log A - a_L log L - a_W log W on all cells. Returns A, a_L, a_W, R2, LOO ranges."""
+    X = np.column_stack([np.ones_like(L), -np.log(L), -np.log(W)])
+    coef, *_ = np.linalg.lstsq(X, np.log(y), rcond=None)
+    pred = X @ coef
+    r2 = 1.0 - np.sum((np.log(y) - pred) ** 2) / np.sum((np.log(y) - np.log(y).mean()) ** 2)
+    loo = np.array([np.linalg.lstsq(X[np.arange(len(y)) != i], np.log(y)[np.arange(len(y)) != i],
+                                    rcond=None)[0][1:] for i in range(len(y))])
+    return (float(np.exp(coef[0])), float(coef[1]), float(coef[2]), float(r2),
+            (float(loo[:, 0].min()), float(loo[:, 0].max())), (float(loo[:, 1].min()), float(loo[:, 1].max())))
+
+
 def saturating_fit(x, y):
     """y = y_inf + c * x^(-a). Returns (y_inf, c, a, R2)."""
     def resid(t):
@@ -182,12 +195,10 @@ def companion_figure(rows, order, Nvals, pal_N, lstar_P, fits):
     gN = np.logspace(np.log10(Ns.min()), np.log10(Ns.max()), 200)
     gD = np.logspace(np.log10(Nd.min()), np.log10(Nd.max()), 200)
     gW = np.logspace(np.log10(Nw.min()), np.log10(Nw.max()), 200)
+    A_sep, aL_sep, aW_sep, r2_sep = fits["E_sep"][:4]
     ax.plot(gN, A_all * gN ** (-a_all), "k--", lw=3.0, zorder=2,
-            label=fr"all {len(rows)} cells:  $\mathcal{{E}}^\ast\propto N^{{-{a_all:.2f}}}$  ($R^2$={r2_all:.2f})")
-    ax.plot(gD, A_d * gD ** (-a_d), color="0.30", ls="-", lw=2.6, zorder=2,
-            label=fr"depth ladder, $W$=768:  $N^{{-{a_d:.2f}}}$  ($R^2$={r2_d:.2f})")
-    ax.plot(gW, A_w * gW ** (-a_w), color="0.50", ls=":", lw=3.5, zorder=2,
-            label=fr"width ladder, $L$=12:  $N^{{-{a_w:.2f}}}$  ($R^2$={r2_w:.2f})")
+            label=fr"$\mathcal{{E}}^\ast\propto N^{{-{a_all:.2f}}}$  ($R^2$={r2_all:.2f}, {len(rows)} cells)")
+    ax.plot([], [], " ", label=fr"separable: $\mathcal{{E}}^\ast\propto L^{{-{aL_sep:.2f}}}W^{{-{aW_sep:.2f}}}$  ($R^2$={r2_sep:.2f})")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8])
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
@@ -246,8 +257,9 @@ def companion_figure(rows, order, Nvals, pal_N, lstar_P, fits):
     plt.close(fig)
 
 
-def write_latex_table(fits, path, n_cells=18):
+def write_latex_table(fits, path, n_cells=18, loss_sep=None):
     A_all, a_all, r2_all = fits["E_all"]
+    A_sep, aL_sep, aW_sep, r2_sep = fits["E_sep"][:4]
     A_w, a_w, r2_w = fits["E_width"]
     Linf, cN, aN, r2_LN = fits["L_vs_N"]
     LinfP, cP, aP_, r2_LP = fits["L_vs_P"]
@@ -261,11 +273,9 @@ def write_latex_table(fits, path, n_cells=18):
   \caption{Fitted exponents for the multi-epoch optimal-stopping and attainable-loss
   relations. Rows in $N$ use the 18 grid cells at $P{=}100$M ($\lambda{=}0$, constant LR,
   $E{=}1$), one point per cell; rows in $P$ use the ten corpus sizes at $L{=}12,W{=}768$,
-  one point per corpus size with the two ensembling strategies averaged. The depth
-  ladder is the $W{=}768$ column of Figure~\ref{fig:datasize_sweep}D and the width ladder
-  the $L{=}12$ row of Figure~\ref{fig:datasize_sweep}E; at fixed width the exponent in $N$
-  is also the exponent in $L$, and at fixed depth the exponent in $W$ is twice the one in
-  $N$. All laws are floor-free, $x^{-\beta}$, because the asymptote of
+  one point per corpus size with the two ensembling strategies averaged. The $L,W$ rows
+  fit depth and width as separate exponents on the same 18 cells; since $N=16LW^2$, a
+  quantity that depends on size only through $N$ has $a_W=2a_L$. All laws are floor-free, $x^{-\beta}$, because the asymptote of
   $\mathcal{L}_\infty+c\,x^{-\alpha}$ is not identifiable on these ranges
   (Appendix Figure~\ref{fig:model_size_profile}); in this common form the exponents in $N$
   and $P$ are directly comparable.}
@@ -277,15 +287,17 @@ def write_latex_table(fits, path, n_cells=18):
 """)
         fh.write(f"    Optimal stopping epoch vs $N$ & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
                  f" & ${a_all:.3f}$ & ${r2_all:.3f}$ & {n_cells}" + EOL)
-        fh.write(f"    \\quad depth ladder only & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
-                 f" & ${a_d:.3f}$ & ${r2_d:.3f}$ & 6" + EOL)
-        fh.write(f"    \\quad width ladder only & $\\mathcal{{E}}^\\ast \\propto N^{{-\\alpha}}$"
-                 f" & ${a_w:.3f}$ & ${r2_w:.3f}$ & 4" + EOL)
+        fh.write(f"    Optimal stopping epoch vs $L,W$ & $\\mathcal{{E}}^\\ast \\propto L^{{-a_L}}W^{{-a_W}}$"
+                 f" & $a_L{{=}}{aL_sep:.3f},\\;a_W{{=}}{aW_sep:.3f}$ & ${r2_sep:.3f}$ & {n_cells}" + EOL)
         fh.write(f"    Optimal stopping epoch vs $P$ & $\\mathcal{{E}}^\\ast \\propto P^{{-\\alpha}}$"
                  f" & ${a_P:.3f}$ & ${r2_P:.3f}$ & 10" + EOL)
         fh.write("    \\midrule\n")
         fh.write(f"    Min val loss vs $N$ & $\\mathcal{{L}}^\\ast \\propto N^{{-\\beta_N}}$"
                  f" & ${aN:.3f}$ & ${r2_LN:.3f}$ & {n_cells}" + EOL)
+        if loss_sep is not None:
+            bL, bW, r2b = loss_sep
+            fh.write(f"    Min val loss vs $L,W$ & $\\mathcal{{L}}^\\ast \\propto L^{{-b_L}}W^{{-b_W}}$"
+                     f" & $b_L{{=}}{bL:.3f},\\;b_W{{=}}{bW:.3f}$ & ${r2b:.3f}$ & {n_cells}" + EOL)
         fh.write(f"    Min val loss vs $P$ & $\\mathcal{{L}}^\\ast \\propto P^{{-\\beta_P}}$"
                  f" & ${aP_:.3f}$ & ${r2_LP:.3f}$ & 10" + EOL)
         fh.write(r"""    \bottomrule
@@ -428,6 +440,8 @@ def main():
     is_w6 = np.array([r["L"] == 6 for r in rows])          # second width ladder, for the CSV
 
     A_all, a_all, r2_all = powerlaw_fit(Ns, eps)
+    Ls_ = np.array([r["L"] for r in rows], float); Ws_ = np.array([r["W"] for r in rows], float)
+    A_sep, aL_sep, aW_sep, r2_sep, looL_sep, looW_sep = separable_powerlaw_fit(Ls_, Ws_, eps)
     A_d, a_d, r2_d = powerlaw_fit(Ns[is_depth], eps[is_depth])
     A_w, a_w, r2_w = powerlaw_fit(Ns[is_width], eps[is_width])
     A_w6, a_w6, r2_w6 = powerlaw_fit(Ns[is_w6], eps[is_w6])
@@ -446,11 +460,7 @@ def main():
     gD = np.logspace(np.log10(Ns[is_depth].min()), np.log10(Ns[is_depth].max()), 200)
     gW = np.logspace(np.log10(Ns[is_width].min()), np.log10(Ns[is_width].max()), 200)
     ax_f.plot(gN, A_all * gN ** (-a_all), "k--", lw=2.5, zorder=2,
-              label=fr"all {len(rows)} cells:  $N^{{-{a_all:.2f}}}$")
-    ax_f.plot(gD, A_d * gD ** (-a_d), color="0.30", ls="-", lw=2.2, zorder=2,
-              label=fr"depth ladder (D):  $N^{{-{a_d:.2f}}}$")
-    ax_f.plot(gW, A_w * gW ** (-a_w), color="0.50", ls=":", lw=3.2, zorder=2,
-              label=fr"width ladder (E):  $N^{{-{a_w:.2f}}}$")
+              label=fr"$\mathcal{{E}}^\ast\propto N^{{-{a_all:.2f}}}$  ({len(rows)} cells)")
 
     # ------------------------------------------------------------ cosmetics
     style_handles = [
@@ -554,6 +564,9 @@ def main():
         fh.write("quantity,subset,n_cells,form,A_or_Linf,c,exponent,R2,note\n")
         fh.write(f"nadir_epoch,all_cells,{len(rows)},E*=A*N^-a,{A_all:.6g},,{a_all:.4f},{r2_all:.4f},"
                  "provisional: depth axis measured pre-CompleteP-residual-fix\n")
+        fh.write(f"nadir_epoch,separable_all_cells,{len(rows)},E*=A*L^-aL*W^-aW,{A_sep:.6g},,"
+                 f"aL={aL_sep:.4f}; aW={aW_sep:.4f},{r2_sep:.4f},LOO aL {looL_sep[0]:.3f}-{looL_sep[1]:.3f} aW "
+                 f"{looW_sep[0]:.3f}-{looW_sep[1]:.3f}; aW/(2aL)={aW_sep/(2*aL_sep):.2f}\n")
         fh.write(f"nadir_epoch,depth_ladder_W768,{int(is_depth.sum())},E*=A*N^-a,{A_d:.6g},,"
                  f"{a_d:.4f},{r2_d:.4f},vary L only; at fixed W the same exponent applies to L\n")
         fh.write(f"nadir_epoch,width_ladder_L12,{int(is_width.sum())},E*=A*N^-a,{A_w:.6g},,"
@@ -571,12 +584,14 @@ def main():
                  "two exponents ARE comparable\n")
     print(f"saved {fits_csv}")
 
-    fits = dict(E_all=(A_all, a_all, r2_all), E_depth=(A_d, a_d, r2_d),
+    fits = dict(E_all=(A_all, a_all, r2_all), E_sep=(A_sep, aL_sep, aW_sep, r2_sep, looL_sep, looW_sep),
+                E_depth=(A_d, a_d, r2_d),
                 E_width=(A_w, a_w, r2_w), E_width_L6=(A_w6, a_w6, r2_w6),
                 L_vs_N=(Linf, cN, aN, r2_L), L_vs_P=(LinfP, cP, aP_, r2_LP),
                 E_vs_P=(A_P, a_P, r2_P))
     companion_figure(rows, order, Nvals, pal_N, lstar_P, fits)
-    write_latex_table(fits, OUTDIR / "stopping_exponents_table.tex", n_cells=len(rows))
+    _Ab, _bL, _bW, _r2b, _, _ = separable_powerlaw_fit(Ls_, Ws_, lstars)
+    write_latex_table(fits, OUTDIR / "stopping_exponents_table.tex", n_cells=len(rows), loss_sep=(_bL, _bW, _r2b))
 
     print("\noptimal stopping vs model size (df=1.0, lambda=0, constant LR, E=1):")
     print(f"{'L':>4} {'W':>6} {'N (M)':>9} {'E*':>7} {'step*':>8} {'L*':>8}")
@@ -584,6 +599,7 @@ def main():
         print(f"{r['L']:>4} {r['W']:>6} {r['N']/1e6:>9.1f} {r['ep_star']:>7.2f} "
               f"{int(r['step_star']):>8} {r['l_star']:>8.4f}")
     print(f"\nE* ~ N^-{a_all:.3f}   (all {len(rows)} cells,        R2={r2_all:.3f})")
+    print(f"E* ~ L^-{aL_sep:.3f} W^-{aW_sep:.3f}   (separable, all cells, R2={r2_sep:.3f}; aW/(2aL)={aW_sep/(2*aL_sep):.2f})")
     print(f"E* ~ N^-{a_d:.3f}   (depth ladder W=768,  R2={r2_d:.3f})  -> exponent in L = {a_d:.3f}")
     print(f"E* ~ N^-{a_w:.3f}   (width ladder L=12,   R2={r2_w:.3f})  -> exponent in W = {2*a_w:.3f}  [pre-fix immune]")
     print(f"E* ~ N^-{a_w6:.3f}   (width ladder L=6,    R2={r2_w6:.3f})  -> exponent in W = {2*a_w6:.3f}")
