@@ -14,16 +14,16 @@
   \label{tab:stopping_exponents}
   \begin{tabular}{llcccc}
     \toprule
-    Quantity & Fitted form & Exponent & $\mathcal{L}_\infty$ & $R^2$ & Cells \\
+    Quantity & Fitted form & Exponent & floor & $R^2$ & Cells \\
     \midrule
-    Optimal stopping epoch & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.426$ & -- & $0.933$ & 12 \\
-    \quad depth ladder ($W{=}768$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.394$ & -- & $0.928$ & 6 \\
+    Optimal stopping epoch & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.314$ & -- & $0.938$ & 18 \\
+    \quad depth ladder ($W{=}768$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.322$ & -- & $0.940$ & 6 \\
     \quad width ladder ($L{=}12$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.332$ & -- & $0.927$ & 4 \\
-    \quad width ladder ($L{=}6$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.453$ & -- & $0.975$ & 4 \\
+    \quad width ladder ($L{=}6$) & $\mathcal{E}^\ast \propto N^{-\alpha}$ & $0.333$ & -- & $0.962$ & 4 \\
     Optimal stopping epoch & $\mathcal{E}^\ast \propto P^{-\alpha}$ & $0.158$ & -- & $0.857$ & 20 \\
     \midrule
-    Min val loss & $\mathcal{L}_\infty + c\,N^{-\alpha_N}$ & $0.187$ & $3.539$ & $0.952$ & 12 \\
-    Min val loss & $\mathcal{L}_\infty + c\,P^{-\alpha_P}$ & $0.178$ & $1.414$ & $0.997$ & 10 \\
+    Min val loss & $\mathcal{L}^\ast \propto N^{-\beta_N}$ & $0.017$ & -- & $0.942$ & 18 \\
+    Min val loss & $\mathcal{L}^\ast \propto P^{-\beta_P}$ & $0.121$ & -- & $0.996$ & 10 \\
     \bottomrule
   \end{tabular}
 \end{table}

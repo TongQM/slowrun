@@ -1,48 +1,36 @@
-"""Model-size scaling law at df=1.0 (100M tokens) -- the term Figure 5's caption
-asks for, split into three standalone figures rather than one multi-panel plot:
+"""Model-size scaling law at P=100M on the ALIGNED grid -- three standalone figures.
 
-  (1) COLLAPSED relation   L* vs N = 16*L*W^2 alone (N = total non-embedding
-                          params, W = width, L = depth; P stays reserved for unique
-                          tokens as in the theory sections).
-  (2) SEPARABLE relation   L* vs L and L* vs W as two independent partial-
-                          residual plots (each axis's fit with the OTHER axis's
-                          fitted contribution subtracted out), so the two power
-                          laws are visible directly rather than as a bar chart
-                          of exponents.
-  (3) TRAINING CURVES      the raw val-loss-vs-steps curves every L* point in
-                          (1)/(2) is a minimum of, so the reader can see e.g.
-                          that d6/w1536 turns back up (overfits) rather than
-                          simply plateauing.
+  (1) COLLAPSED   L* vs N = 16 L W^2 alone, floor-free power law  L* = A N^-beta
+  (2) SEPARABLE   L* = A L^-b_L W^-b_W as two partial-residual panels (each axis's
+                  fit with the OTHER axis's fitted contribution divided out)
+  (3) PROFILE     why the fits are floor-free: R^2 of the saturating form
+                  L_inf + c N^-alpha as a function of a FIXED L_inf is flat from
+                  L_inf = 2 up to ~3.5 and only then falls, so the asymptote (and
+                  every exponent conditioned on it) is not identifiable from
+                  14M-906M parameters at P=100M. The floor-free law is the limit
+                  L_inf -> -inf of that family and is the one well-posed fit.
 
-Data: every (depth, width) cell we have at df=1.0, lambda=0, constant LR, E=1,
-model 0 -- 12 cells spanning L in {6..60} and W in {384..1536}, a 40x range in
-non-embedding parameters N.
+Data: expt_cells.ALIGNED_CELLS -- 18 cells at df=1.0, lambda=0, constant LR,
+E=1, model 0: the 4x4 factorial L in {6,12,18,24} x W in {384,768,1152,1536}
+plus d48/768 and d60/768, all under the corrected CompleteP residual scaling
+(or on the L=12 row where the correction is the identity). 14M to 906M
+non-embedding parameters, a 64x range.
 
-Two fitted forms, both still computed (fit numbers feed all three figures):
-
-  collapsed:  L = L_inf + c * N^-alpha
-  separable:  L = L_inf + c_L * L^-alpha_L + c_W * W^-alpha_W
-
-Caveats carried into the captions:
-  - lambda=0, i.e. the UNREGULARIZED regime, where capacity gains are heavily
-    suppressed relative to tuning lambda at fixed size (see the companion
-    capacity figure: 0.155 nats across the whole depth axis here, vs 0.336 nats
-    from tuning lambda at fixed L=12).
-  - d6/w1536 is non-monotone in the raw curve (min then rises), the largest
-    residual in the separable fit.
-  - the depth axis was measured under the pre-fix CompleteP residual scaling
-    (see unlimited/train.py commit c660582); the depth exponent is provisional.
+Reading the separable exponents: doubling depth doubles N and buys b_L ln2 in
+log-loss; doubling width quadruples N and buys b_W ln2. Per unit of log N that
+is b_L for depth against b_W/2 for width, so the ratio b_W / (2 b_L) says
+whether parameter count is a sufficient statistic (=1), or width (>1) or depth
+(<1) is worth more per parameter.
 
 Outputs:
   experiments/figures/04_scaling_law/expt_fig5_model_size_collapsed.{pdf,png}
   experiments/figures/04_scaling_law/expt_fig5_model_size_separable.{pdf,png}
-  experiments/figures/04_scaling_law/expt_fig5_model_size_curves.{pdf,png}
+  experiments/figures/04_scaling_law/expt_fig5_model_size_profile.{pdf,png}
   experiments/figures/04_scaling_law/expt_fig5_model_size_law_fits.csv
 """
 from __future__ import annotations
 
-import re
-import glob
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -50,220 +38,164 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.optimize import least_squares
+from matplotlib.lines import Line2D
 
-REPO = Path(__file__).resolve().parents[2]
-LOGS = REPO / "experiments" / "logs"
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from expt_cells import ALIGNED_CELLS as CELLS  # noqa: E402
+from expt_fig1_sister_panels import load_cell, setup_style  # noqa: E402
+
+REPO = HERE.parents[1]
 OUTDIR = REPO / "experiments" / "figures" / "04_scaling_law"
-IND = re.compile(r"\[model \d+ val @ step (\d+)\] val_loss=([\d.]+)")
-
-CELLS = {
-    (6, 384): "fd_train_d6_w384_*_0.out",      (6, 768): "fd_train_d6_w768_*_0.out",
-    (6, 1152): "fd_gridfill_d6_w1152_*_0.out", (6, 1536): "fd_gridfill_d6_w1536_*_0.out",
-    (12, 384): "fd_train_d12_w384_*_0.out",    (12, 768): "fd_train_d12_w768_*_0.out",
-    (12, 1152): "fd_widthext_d12_w1152_*_0.out", (12, 1536): "fd_widthext_d12_w1536_*_0.out",
-    (18, 768): "fd_gridfill_d18_w768_*_0.out", (24, 768): "fd_gridfill_d24_w768_*_0.out",
-    (48, 768): "fd_gridfill_d48_w768_*_0.out", (60, 768): "fd_gridfill_d60_w768_*_0.out",
-}
 
 
-def curve(pattern):
-    """step -> val_loss, merged across resume segments."""
-    pts = {}
-    for f in glob.glob(str(LOGS / pattern)):
-        with open(f, errors="ignore") as fh:
-            for line in fh:
-                m = IND.search(line)
-                if m:
-                    pts[int(m.group(1))] = float(m.group(2))
-    return pts
+def r2(y, pred):
+    return float(1 - np.sum((y - pred) ** 2) / np.sum((y - y.mean()) ** 2))
 
 
-def min_val(pattern):
-    pts = curve(pattern)
-    return min(pts.values()) if pts else None
+def collapsed_fit(N, y):
+    """log y = log A - beta log N. Returns A, beta, R2 (in log), R2 (in loss)."""
+    a, b = np.polyfit(np.log(N), np.log(y), 1)
+    return float(np.exp(b)), float(-a), r2(np.log(y), a * np.log(N) + b), r2(y, np.exp(b) * N ** a)
 
 
-def params_m(L, N):
-    return 16 * L * N**2 / 1e6
+def separable_fit(L, W, y):
+    """log y = log A - b_L log L - b_W log W. Returns A, b_L, b_W, R2, leave-one-out ranges."""
+    X = np.column_stack([np.ones_like(L), -np.log(L), -np.log(W)])
+    coef, *_ = np.linalg.lstsq(X, np.log(y), rcond=None)
+    loo = []
+    for i in range(len(y)):
+        m = np.arange(len(y)) != i
+        c, *_ = np.linalg.lstsq(X[m], np.log(y[m]), rcond=None)
+        loo.append((c[1], c[2]))
+    loo = np.array(loo)
+    return (float(np.exp(coef[0])), float(coef[1]), float(coef[2]), r2(np.log(y), X @ coef),
+            (float(loo[:, 0].min()), float(loo[:, 0].max())), (float(loo[:, 1].min()), float(loo[:, 1].max())))
 
 
-def fit(resid, x0):
-    r = least_squares(resid, x0, method="trf", max_nfev=200000)
-    return r.x, float(np.sum(r.fun**2))
-
-
-def style():
-    sns.set(font_scale=1.4)
-    sns.set_style("whitegrid")
-    plt.rcParams["axes.linewidth"] = 3.5
-    plt.rcParams["grid.alpha"] = 0.25
+def profile(N, y, floors):
+    """R^2 of L_inf + c N^-alpha with L_inf FIXED, for each floor."""
+    out = []
+    for Linf in floors:
+        m = y > Linf
+        if m.sum() < 3:
+            out.append((Linf, np.nan, np.nan)); continue
+        a, b = np.polyfit(np.log(N[m]), np.log(y[m] - Linf), 1)
+        out.append((Linf, float(-a), r2(y, Linf + np.exp(b) * N ** a)))
+    return out
 
 
 def main():
-    data = {k: min_val(p) for k, p in CELLS.items()}
-    data = {k: v for k, v in data.items() if v is not None}
-    Ls = np.array([k[0] for k in data], float)
-    Ws = np.array([k[1] for k in data], float)
-    ys = np.array([data[k] for k in data], float)
-    N = 16 * Ls * Ws**2 / 1e6
-    ybar = ys.mean()
-    sstot = float(np.sum((ys - ybar) ** 2))
+    setup_style()
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    ks = sorted(CELLS, key=lambda k: 16 * k[0] * k[1] ** 2)
+    L = np.array([k[0] for k in ks], float)
+    W = np.array([k[1] for k in ks], float)
+    y = np.array([float(np.min(load_cell(CELLS[k])["val"])) for k in ks])
+    N = 16 * L * W ** 2 / 1e6
 
-    def r_col(t):
-        Linf, c, a = t
-        return Linf + c * N ** (-a) - ys
-    pa, ssa = fit(r_col, [3.5, 5.0, 0.3])
+    A, beta, r2log, r2lin = collapsed_fit(N, y)
+    As, bL, bW, r2s, looL, looW = separable_fit(L, W, y)
+    floors = [2.0, 2.5, 3.0, 3.2, 3.4, 3.5, 3.6, 3.7, 3.75]
+    prof = profile(N, y, floors)
 
-    def r_sep(t):
-        Linf, cL, aL, cW, aW = t
-        return Linf + cL * Ls ** (-aL) + cW * Ws ** (-aW) - ys
-    pb, ssb = fit(r_sep, [3.5, 1.0, 0.3, 5.0, 0.3])
-    Linf, cL, aL, cW, aW = pb
+    print(f"n = {len(y)} cells,  L in {sorted(set(L.astype(int)))},  W in {sorted(set(W.astype(int)))},  N {N.min():.0f}M-{N.max():.0f}M")
+    print(f"collapsed  L* = {A:.3f} N_M^-{beta:.4f}   R2(log)={r2log:.3f} R2(loss)={r2lin:.3f}")
+    print(f"separable  L* = {As:.3f} L^-{bL:.4f} W^-{bW:.4f}   R2={r2s:.3f}")
+    print(f"  leave-one-out: b_L in [{looL[0]:.4f}, {looL[1]:.4f}], b_W in [{looW[0]:.4f}, {looW[1]:.4f}]")
+    print(f"  b_W / (2 b_L) = {bW / (2 * bL):.2f}  -> depth worth {2 * bL / bW:.2f}x width per parameter")
+    print("profile of the saturating form (fixed L_inf):")
+    for Linf, al, rr in prof:
+        print(f"  L_inf={Linf:.2f}  alpha={al:.3f}  R2={rr:.3f}")
 
-    print(f"n = {len(ys)} cells,  L in {sorted(set(Ls.astype(int)))},  W in {sorted(set(Ws.astype(int)))}")
-    print(f"\ncollapsed  L = {pa[0]:.4f} + {pa[1]:.4f} * N^-{pa[2]:.4f}   R2={1-ssa/sstot:.4f}")
-    print(f"separable  L = {Linf:.4f} + {cL:.4f} * L^-{aL:.4f} + {cW:.4f} * W^-{aW:.4f}   R2={1-ssb/sstot:.4f}")
-    print(f"  depth exponent a_L = {aL:.3f}   width exponent a_W = {aW:.3f}")
-    print(f"  variance explained by separating the axes: {(ssa-ssb)/ssa*100:.1f}% of the collapsed SSE")
-
-    style()
-    cool_by_L = {d: c for d, c in zip(sorted(set(Ls.astype(int))),
-                                      sns.color_palette("cool", len(set(Ls.astype(int)))))}
+    cool_by_L = {d: c for d, c in zip(sorted(set(L.astype(int))), sns.color_palette("cool", len(set(L.astype(int)))))}
     marker_by_W = {384: "o", 768: "s", 1152: "^", 1536: "D"}
+    leg_w = [Line2D([0], [0], marker=marker_by_W[n], color="0.3", lw=0, markersize=10, label=f"$W$={n}") for n in sorted(marker_by_W)]
+    leg_l = [Line2D([0], [0], marker="o", color=cool_by_L[d], lw=0, markersize=10, label=f"$L$={d}") for d in sorted(cool_by_L)]
 
-    # ---------------------------------------------------------------- (1)
-    fig, ax = plt.subplots(figsize=(7.5, 6))
-    for (L, W), n, y in zip(data.keys(), N, ys):
-        ax.scatter(n, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
-                   edgecolor="0.2", lw=1.3, zorder=3)
-    grid = np.logspace(np.log10(N.min()), np.log10(N.max()), 200)
-    ax.plot(grid, pa[0] + pa[1] * grid ** (-pa[2]), "k--", lw=2.5, zorder=2,
-           label=fr"fit: $\mathcal{{L}}_\infty$+{pa[1]:.2f}$\,N^{{-{pa[2]:.2f}}}$")
-    from matplotlib.lines import Line2D
-    leg1 = [Line2D([0], [0], marker=marker_by_W[n], color="0.3", lw=0, markersize=10,
-                   label=f"$W$={n}") for n in sorted(marker_by_W)]
-    leg2 = [Line2D([0], [0], marker="o", color=cool_by_L[d], lw=0, markersize=10,
-                   label=f"$L$={d}") for d in sorted(cool_by_L)]
-    ax.set_xscale("log")
-    ax.set_xlabel(r"non-embedding parameters  $N=16LW^2$  (M)")
+    # ---------------------------------------------------------------- (1) collapsed
+    fig, ax = plt.subplots(figsize=(8, 6.4))
+    for k, n, v in zip(ks, N, y):
+        ax.scatter(n, v, s=150, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    g = np.logspace(np.log10(N.min()), np.log10(N.max()), 200)
+    ax.plot(g, A * g ** (-beta), "k--", lw=2.5, zorder=2, label=fr"$\mathcal{{L}}^*={A:.2f}\,N^{{-{beta:.3f}}}$")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_yticks([3.8, 3.9, 4.0, 4.1]); ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1f}"))
+    ax.yaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xticks([20, 50, 100, 200, 500]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}M"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel(r"non-embedding parameters  $N=16LW^2$")
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$")
-    ax.set_title(f"Collapsed relation: $N$ alone   ($R^2$={1-ssa/sstot:.3f})", fontsize=15)
-    l1 = ax.legend(handles=leg1, loc="upper right", title="width", fontsize=11, title_fontsize=11)
-    ax.add_artist(l1)
-    ax.legend(handles=leg2 + [Line2D([0], [0], color="k", ls="--", lw=2.5, label="fit")],
-             loc="lower left", fontsize=11)
+    ax.set_title(fr"Collapsed onto $N$: floor-free power law  ($R^2$={r2lin:.3f})", fontsize=15)
+    l1 = ax.legend(handles=leg_w, loc="upper right", title="width", fontsize=11, title_fontsize=11); ax.add_artist(l1)
+    ax.legend(handles=leg_l + [Line2D([0], [0], color="k", ls="--", lw=2.5, label="fit")], loc="lower left", fontsize=11)
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        pth = OUTDIR / f"expt_fig5_model_size_collapsed.{ext}"
-        OUTDIR.mkdir(parents=True, exist_ok=True)
-        fig.savefig(pth, bbox_inches="tight", dpi=300)
-        print(f"Saved {pth}")
-    plt.close(fig)
+        fig.savefig(OUTDIR / f"expt_fig5_model_size_collapsed.{ext}", bbox_inches="tight", dpi=300)
+    plt.close(fig); print(f"Saved {OUTDIR / 'expt_fig5_model_size_collapsed.pdf'}")
 
-    # ---------------------------------------------------------------- (2)
-    # Partial residuals: for the depth panel, remove the FITTED width term from
-    # each point so only the L-dependence remains (and symmetrically for width).
-    y_minus_width = ys - cW * Ws ** (-aW)
-    y_minus_depth = ys - cL * Ls ** (-aL)
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.8))
+    # ---------------------------------------------------------------- (2) separable
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
     ax = axes[0]
-    for (L, W), x, y in zip(data.keys(), Ls, y_minus_width):
-        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
-                  edgecolor="0.2", lw=1.3, zorder=3)
-    gl = np.logspace(np.log10(Ls.min()), np.log10(Ls.max()), 200)
-    ax.plot(gl, Linf + cL * gl ** (-aL), "k--", lw=2.5, zorder=2)
-    ax.set_xscale("log")
-    ax.set_xlabel(r"depth  $L$")
-    ax.set_ylabel(r"$\mathcal{L}^* - c_W W^{-\alpha_W}$  (width term removed)")
-    ax.set_title(fr"depth relation: $\alpha_L$={aL:.3f}", fontsize=15)
-
+    yL = y * W ** bW          # divide out the fitted width factor -> A L^-b_L
+    for k, x, v in zip(ks, L, yL):
+        ax.scatter(x, v, s=140, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    gl = np.logspace(np.log10(L.min()), np.log10(L.max()), 200)
+    ax.plot(gl, As * gl ** (-bL), "k--", lw=2.5, zorder=2)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xticks([6, 12, 18, 24, 48, 60]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel(r"depth  $L$"); ax.set_ylabel(r"$\mathcal{L}^*\,W^{b_W}$   (width factor removed)")
+    ax.set_title(fr"depth: $b_L$={bL:.4f}  (LOO {looL[0]:.4f}-{looL[1]:.4f})", fontsize=14)
     ax = axes[1]
-    for (L, W), x, y in zip(data.keys(), Ws, y_minus_depth):
-        ax.scatter(x, y, s=140, color=cool_by_L[int(L)], marker=marker_by_W[int(W)],
-                  edgecolor="0.2", lw=1.3, zorder=3)
-    gn = np.logspace(np.log10(Ws.min()), np.log10(Ws.max()), 200)
-    ax.plot(gn, Linf + cW * gn ** (-aW), "k--", lw=2.5, zorder=2)
-    ax.set_xscale("log")
-    ax.set_xlabel(r"width  $W$")
-    ax.set_ylabel(r"$\mathcal{L}^* - c_L L^{-\alpha_L}$  (depth term removed)")
-    ax.set_title(fr"width relation: $\alpha_W$={aW:.3f}", fontsize=15)
-
-    l1 = axes[1].legend(handles=leg1, loc="upper right", title="width", fontsize=10, title_fontsize=10)
-    axes[1].add_artist(l1)
-    axes[1].legend(handles=leg2, loc="lower left", title="depth", fontsize=10, title_fontsize=10)
-
-    fig.suptitle(r"Separable relation:  $\mathcal{L}^*=\mathcal{L}_\infty+c_L L^{-\alpha_L}+c_W W^{-\alpha_W}$"
-                fr"   ($R^2$={1-ssb/sstot:.3f})", fontsize=15)
+    yW = y * L ** bL
+    for k, x, v in zip(ks, W, yW):
+        ax.scatter(x, v, s=140, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    gw = np.logspace(np.log10(W.min()), np.log10(W.max()), 200)
+    ax.plot(gw, As * gw ** (-bW), "k--", lw=2.5, zorder=2)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xticks([384, 768, 1152, 1536]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel(r"width  $W$"); ax.set_ylabel(r"$\mathcal{L}^*\,L^{b_L}$   (depth factor removed)")
+    ax.set_title(fr"width: $b_W$={bW:.4f}  (LOO {looW[0]:.4f}-{looW[1]:.4f})", fontsize=14)
+    for a_ in axes:
+        a_.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}")); a_.yaxis.set_minor_formatter(plt.NullFormatter())
+    l1 = axes[1].legend(handles=leg_w, loc="upper right", title="width", fontsize=10, title_fontsize=10); axes[1].add_artist(l1)
+    axes[1].legend(handles=leg_l, loc="lower left", title="depth", fontsize=10, title_fontsize=10)
+    fig.suptitle(fr"Separable floor-free law  $\mathcal{{L}}^*=A\,L^{{-b_L}}W^{{-b_W}}$  ($R^2$={r2s:.3f});"
+                 fr"   $b_W/(2b_L)$={bW/(2*bL):.2f}: depth is worth {2*bL/bW:.2f}$\times$ width per parameter", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     for ext in ("pdf", "png"):
-        pth = OUTDIR / f"expt_fig5_model_size_separable.{ext}"
-        fig.savefig(pth, bbox_inches="tight", dpi=300)
-        print(f"Saved {pth}")
-    plt.close(fig)
+        fig.savefig(OUTDIR / f"expt_fig5_model_size_separable.{ext}", bbox_inches="tight", dpi=300)
+    plt.close(fig); print(f"Saved {OUTDIR / 'expt_fig5_model_size_separable.pdf'}")
 
-    # ---------------------------------------------------------------- (3)
-    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
-    TOTAL_BATCH_SIZE = 131072  # tokens/step, project default (see slowrun/CLAUDE.md)
-
-    ax = axes[0]
-    for (L, W) in data:
-        if W != 768:
-            continue
-        c = curve(CELLS[(L, W)])
-        st = np.array(sorted(c)); v = np.array([c[k] for k in st])
-        tok_b = st * TOTAL_BATCH_SIZE / 1e9
-        ax.plot(tok_b, v, "-", color=cool_by_L[int(L)], lw=2.5, label=f"$L$={L}")
-    ax.set_xlabel("tokens seen (B, cumulative incl. repeats)")
-    ax.set_ylabel(r"val loss $\mathcal{L}$")
-    ax.set_title(r"(A) depth ladder, $W$=768 fixed", fontsize=15)
-    ax.legend(fontsize=11)
-    ax.set_ylim(3.5, 5.5)
-
-    ax = axes[1]
-    for (L, W) in data:
-        if L not in (6, 12):
-            continue
-        c = curve(CELLS[(L, W)])
-        st = np.array(sorted(c)); v = np.array([c[k] for k in st])
-        tok_b = st * TOTAL_BATCH_SIZE / 1e9
-        ls = "-" if L == 6 else "--"
-        ax.plot(tok_b, v, ls, color=cool_by_L.get(int(L), "0.3"),
-                marker=marker_by_W[int(W)], markevery=25, ms=7, lw=2.2,
-                label=f"$L$={L}, $W$={W}")
-    ax.set_xlabel("tokens seen (B, cumulative incl. repeats)")
-    ax.set_ylabel(r"val loss $\mathcal{L}$")
-    ax.set_title(r"(B) width ladder, $L\in\{6,12\}$", fontsize=15)
-    ax.legend(fontsize=9, ncol=2)
-    ax.set_ylim(3.5, 5.5)
-    c6_1536 = curve(CELLS[(6, 1536)])
-    st6 = np.array(sorted(c6_1536))
-    turn_step = st6[np.argmin([c6_1536[k] for k in st6])]
-    turn_tok = turn_step * TOTAL_BATCH_SIZE / 1e9
-    ax.annotate(r"$d6/w1536$ turns back up",
-               xy=(turn_tok, min(c6_1536.values())), xytext=(turn_tok * 0.35, 4.6),
-               fontsize=11, color="0.25",
-               arrowprops=dict(arrowstyle="->", lw=1.8, color="0.35"))
-
-    fig.suptitle(r"Validation loss vs training, $df=1.0$, $\lambda=0$, constant LR, $E=1$"
-                " -- every $\\mathcal{L}^*$ above is the minimum of one such curve", fontsize=15)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    # ---------------------------------------------------------------- (3) profile
+    fig, ax = plt.subplots(figsize=(8, 5.6))
+    pf = np.array([(a, b, c) for a, b, c in prof if np.isfinite(c)])
+    ax.plot(pf[:, 0], pf[:, 2], "-o", color="black", lw=2.6, ms=9, label=r"$R^2$ of $\mathcal{L}_\infty + c\,N^{-\alpha}$ at fixed $\mathcal{L}_\infty$")
+    ax.axhline(r2lin, color="0.45", ls="--", lw=2.2, label=fr"floor-free power law ($R^2$={r2lin:.3f})")
+    ax2 = ax.twinx()
+    ax2.plot(pf[:, 0], pf[:, 1], "s:", color="0.5", lw=2.0, ms=8, label=r"fitted $\alpha$ at that $\mathcal{L}_\infty$")
+    ax2.set_ylabel(r"$\alpha$  (open axis)", color="0.45"); ax2.grid(False)
+    ax.set_xlabel(r"assumed asymptote  $\mathcal{L}_\infty$"); ax.set_ylabel(r"$R^2$")
+    ax.set_ylim(0.80, 0.97)
+    ax.set_title("The asymptote is not identifiable from 14M-906M at $P$=100M", fontsize=15)
+    h1, l1_ = ax.get_legend_handles_labels(); h2, l2_ = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1_ + l2_, loc="lower left", fontsize=11)
+    fig.tight_layout()
     for ext in ("pdf", "png"):
-        pth = OUTDIR / f"expt_fig5_model_size_curves.{ext}"
-        fig.savefig(pth, bbox_inches="tight", dpi=300)
-        print(f"Saved {pth}")
-    plt.close(fig)
+        fig.savefig(OUTDIR / f"expt_fig5_model_size_profile.{ext}", bbox_inches="tight", dpi=300)
+    plt.close(fig); print(f"Saved {OUTDIR / 'expt_fig5_model_size_profile.pdf'}")
 
     with open(OUTDIR / "expt_fig5_model_size_law_fits.csv", "w") as fh:
-        fh.write("form,param,value\n")
-        for n, v in zip(("L_inf", "c", "alpha"), pa):
-            fh.write(f"collapsed,{n},{v:.6f}\n")
-        fh.write(f"collapsed,R2,{1-ssa/sstot:.6f}\n")
-        for n, v in zip(("L_inf", "c_L", "alpha_L", "c_W", "alpha_W"), pb):
-            fh.write(f"separable,{n},{v:.6f}\n")
-        fh.write(f"separable,R2,{1-ssb/sstot:.6f}\n")
-        fh.write("data,n_cells,%d\n" % len(ys))
+        fh.write("form,param,value,note\n")
+        fh.write(f"collapsed,A,{A:.6f},L*=A*N_M^-beta\ncollapsed,beta,{beta:.6f},\ncollapsed,R2_loss,{r2lin:.6f},\n")
+        fh.write(f"separable,A,{As:.6f},L*=A*L^-bL*W^-bW\nseparable,b_L,{bL:.6f},LOO {looL[0]:.6f}-{looL[1]:.6f}\n")
+        fh.write(f"separable,b_W,{bW:.6f},LOO {looW[0]:.6f}-{looW[1]:.6f}\nseparable,R2_log,{r2s:.6f},\n")
+        fh.write(f"separable,bW_over_2bL,{bW/(2*bL):.6f},<1: depth worth more per parameter\n")
+        for Linf, al, rr in prof:
+            fh.write(f"profile,L_inf={Linf:.2f},{rr:.6f},alpha={al:.4f}\n")
+        fh.write(f"data,n_cells,{len(y)},\n")
     print(f"Saved {OUTDIR / 'expt_fig5_model_size_law_fits.csv'}")
 
 

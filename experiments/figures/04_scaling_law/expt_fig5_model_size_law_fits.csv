@@ -1,12 +1,19 @@
-form,param,value
-collapsed,L_inf,3.539089
-collapsed,c,0.930286
-collapsed,alpha,0.186736
-collapsed,R2,0.951541
-separable,L_inf,3.573057
-separable,c_L,0.595164
-separable,alpha_L,0.538163
-separable,c_W,24.843850
-separable,alpha_W,0.739653
-separable,R2,0.973159
-data,n_cells,12
+form,param,value,note
+collapsed,A,4.239455,L*=A*N_M^-beta
+collapsed,beta,0.016594,
+collapsed,R2_loss,0.942643,
+separable,A,5.028825,L*=A*L^-bL*W^-bW
+separable,b_L,0.020635,LOO 0.019692-0.021148
+separable,b_W,0.029687,LOO 0.028790-0.030836
+separable,R2_log,0.968417,
+separable,bW_over_2bL,0.719321,<1: depth worth more per parameter
+profile,L_inf=2.00,0.942734,alpha=0.0340
+profile,L_inf=2.50,0.942694,alpha=0.0460
+profile,L_inf=3.00,0.942325,alpha=0.0714
+profile,L_inf=3.20,0.941741,alpha=0.0917
+profile,L_inf=3.40,0.939983,alpha=0.1284
+profile,L_inf=3.50,0.937590,alpha=0.1608
+profile,L_inf=3.60,0.931355,alpha=0.2163
+profile,L_inf=3.70,0.904986,alpha=0.3363
+profile,L_inf=3.75,0.833057,alpha=0.4823
+data,n_cells,18,

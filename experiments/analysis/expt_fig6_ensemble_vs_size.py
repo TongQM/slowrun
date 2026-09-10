@@ -47,8 +47,12 @@ from matplotlib.lines import Line2D
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from expt_fig1_sister_panels import (  # noqa: E402
-    CELLS, STEPS_PER_EPOCH, find_nadir, load_cell, saturating_fit, setup_style,
+    CELLS, LOGS, STEPS_PER_EPOCH, find_nadir, load_cell, powerlaw_fit, setup_style,
 )
+from expt_cells import ENSEMBLE_REPLAY_LOGS  # noqa: E402
+import glob as _glob
+import re as _re
+REPLAY_RE = _re.compile(r"\[step (\d+) ens=(\d+)\] val_loss=([\d.]+)")
 
 REPO = HERE.parents[1]
 ENS_CSV = REPO / "data_export" / "100M_data" / "val_loss_ensembles.csv"
@@ -66,6 +70,14 @@ def load_ensembles():
                 continue
             raw[(int(r["depth"]), int(r["width"]), int(r["E"]))].append(
                 (int(r["step"]), float(r["val_loss"])))
+    # post-fix ensemble cells: parsed from the fused-replay logs (only finished replays)
+    for (L, W), pat in ENSEMBLE_REPLAY_LOGS.items():
+        for f in _glob.glob(str(LOGS / pat)):
+            txt = open(f, errors="ignore").read()
+            if "Done:" not in txt:
+                continue
+            for m in REPLAY_RE.finditer(txt):
+                raw[(L, W, int(m.group(2)))].append((int(m.group(1)), float(m.group(3))))
     out = {}
     for k, pts in raw.items():
         pts.sort()
@@ -87,8 +99,9 @@ def main():
         single[k] = dict(N=16 * k[0] * k[1] ** 2, l_star=l_star, s_star=s_star)
     N1 = np.array([single[k]["N"] for k in single], float)
     L1 = np.array([single[k]["l_star"] for k in single], float)
-    Linf, c1, a1, r2_1 = saturating_fit(N1 / 1e6, L1)
-    fit1 = lambda n: Linf + c1 * (n / 1e6) ** (-a1)  # noqa: E731
+    # floor-free E=1 law (the asymptote is not identifiable; see expt_fig5's profile panel)
+    c1, a1, r2_1 = powerlaw_fit(N1 / 1e6, L1); Linf = 0.0
+    fit1 = lambda n: c1 * (n / 1e6) ** (-a1)  # noqa: E731
 
     # ---- E>1: replayed ensembles at the four replicated cells
     ens = load_ensembles()
@@ -97,6 +110,8 @@ def main():
     for (L, W) in cells_E:
         N = 16 * L * W ** 2
         for E in E_SHOW:
+            if (L, W, E) not in ens:
+                continue
             st, v = ens[(L, W, E)]
             i, s_star, l_star = find_nadir(st, v)
             rows.append(dict(L=L, W=W, N=N, E=E, N_eff=E * N, l_star=l_star,
@@ -140,9 +155,9 @@ def main():
     # (A) L* vs N_eff
     ax = axes[0]
     ax.scatter(N1, L1, s=170, color="0.25", edgecolor="black", linewidth=0.9, zorder=4,
-               label="single model  ($E$=1), 12 cells")
+               label=f"single model  ($E$=1), {len(N1)} cells")
     ax.plot(gN, fit1(gN), "k--", lw=2.8, zorder=2,
-            label=fr"$E$=1 fit: $\mathcal{{L}}_\infty$={Linf:.3f}, $\alpha$={a1:.2f}")
+            label=fr"$E$=1 law: $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$  ({len(N1)} cells)")
     for E in E_SHOW:
         rr = [r for r in rows if r["E"] == E]
         ax.scatter([r["N_eff"] for r in rr], [r["l_star"] for r in rr], s=200 if E == 4 else 110,
@@ -219,8 +234,8 @@ def main():
                      f"{r['single_s_star']/STEPS_PER_EPOCH:.2f},{r['fit1_at_Neff']:.4f},{r['gap']:.4f}\n")
     with open(OUTDIR / "expt_fig6_ensemble_vs_size_fits.csv", "w") as fh:
         fh.write("model,param,value,note\n")
-        fh.write(f"E1_collapsed,L_inf,{Linf:.6f},12 cells\nE1_collapsed,c,{c1:.6f},\n"
-                 f"E1_collapsed,alpha,{a1:.6f},\nE1_collapsed,R2,{r2_1:.6f},\n")
+        fh.write(f"E1_collapsed,form,floor-free L*=A*N_M^-beta,{len(N1)} cells\nE1_collapsed,A,{c1:.6f},\n"
+                 f"E1_collapsed,beta,{a1:.6f},\nE1_collapsed,R2,{r2_1:.6f},\n")
         fh.write(f"E4_H1_shift,Delta,{Delta:.6f},lower floor same excess; SSE={sse_H1:.6f}\n")
         fh.write(f"E4_H2_prefactor,rho,{rho:.6f},same floor smaller excess; SSE={sse_H2:.6f}\n")
         fh.write(f"E4_shared_floor,c,{c4:.6f},two-parameter; SSE={sse_2p:.6f}\n")
@@ -230,7 +245,7 @@ def main():
                      f"ens4={m['ens4']:.4f} single={m['single_l']:.4f} at N_eff={m['N_eff']/1e6:.0f}M\n")
     print(f"saved {OUTDIR / 'expt_fig6_ensemble_vs_size_fits.csv'}")
 
-    print(f"\nE=1 collapsed fit: L_inf={Linf:.4f} c={c1:.4f} alpha={a1:.4f} (R2={r2_1:.3f})")
+    print(f"\nE=1 floor-free law: L* = {c1:.4f} N_M^-{a1:.4f} (R2={r2_1:.3f}), {len(N1)} cells")
     print(f"\n{'cell':>10} {'N':>6} {'E':>2} {'E*N':>6} {'L*_E':>8} {'law(EN)':>8} {'gap':>7} {'ep*':>5}")
     for r in rows:
         print(f"L{r['L']}/W{r['W']:<5} {r['N']/1e6:>5.0f}M {r['E']:>2} {r['N_eff']/1e6:>5.0f}M "

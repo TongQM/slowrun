@@ -1,15 +1,17 @@
 model,param,value,note
-E1_collapsed,L_inf,3.539089,12 cells
-E1_collapsed,c,0.930286,
-E1_collapsed,alpha,0.186736,
-E1_collapsed,R2,0.951541,
-E4_H1_shift,Delta,0.151477,lower floor same excess; SSE=0.002035
-E4_H2_prefactor,rho,0.598828,same floor smaller excess; SSE=0.006591
-E4_shared_floor,c,1.702106,two-parameter; SSE=0.000822
-E4_shared_floor,alpha,0.420379,compare alpha=0.1867 for E=1
-matched_N,L6/W384_x4_vs_L6/W768,0.112739,ens4=3.8602 single=3.9729 at N_eff=57M
+E1_collapsed,form,floor-free L*=A*N_M^-beta,18 cells
+E1_collapsed,A,4.239455,
+E1_collapsed,beta,0.016594,
+E1_collapsed,R2,0.941839,
+E4_H1_shift,Delta,0.139290,lower floor same excess; SSE=0.003296
+E4_H2_prefactor,rho,0.964077,same floor smaller excess; SSE=0.003384
+E4_shared_floor,c,4.114470,two-parameter; SSE=0.003252
+E4_shared_floor,alpha,0.017834,compare alpha=0.0166 for E=1
+matched_N,L6/W384_x4_vs_L6/W768,0.108039,ens4=3.8602 single=3.9682 at N_eff=57M
+matched_N,L6/W384_x4_vs_L24/W384,0.102539,ens4=3.8602 single=3.9627 at N_eff=57M
 matched_N,L12/W384_x4_vs_L12/W768,0.157647,ens4=3.7519 single=3.9095 at N_eff=113M
-matched_N,L6/W768_x4_vs_L6/W1536,0.201524,ens4=3.7308 single=3.9323 at N_eff=226M
-matched_N,L6/W768_x4_vs_L24/W768,0.142024,ens4=3.7308 single=3.8728 at N_eff=226M
+matched_N,L6/W768_x4_vs_L6/W1536,0.190724,ens4=3.7308 single=3.9215 at N_eff=226M
+matched_N,L6/W768_x4_vs_L24/W768,0.132424,ens4=3.7308 single=3.8632 at N_eff=226M
 matched_N,L12/W768_x4_vs_L12/W1536,0.157153,ens4=3.6649 single=3.8221 at N_eff=453M
-matched_N,L12/W768_x4_vs_L48/W768,0.160753,ens4=3.6649 single=3.8257 at N_eff=453M
+matched_N,L12/W768_x4_vs_L48/W768,0.145953,ens4=3.6649 single=3.8109 at N_eff=453M
+matched_N,L6/W1536_x4_vs_L24/W1536,0.121631,ens4=3.6716 single=3.7932 at N_eff=906M
