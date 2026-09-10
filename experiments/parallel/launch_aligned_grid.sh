@@ -28,6 +28,8 @@
 #   dyn_ens_d6  same recipe at L6/W768 and L6/W384: the two pre-fix ensemble cells
 #               behind Figure 8 (their L=12 partners are unaffected by the fix).
 #               Chain it behind dyn_ens226 with AFTER_JOB=<its last cleanup job>.
+#   dyn_w1728   L12/W1728 (27 heads): the single model at 5x the base compute, so the
+#               width panel of Figure 2B has a partner for E=5 as the depth panel has d60
 #   dyn_e1      = dyn_rerun + dyn_fill + dyn_p20 (every single-model dynamics run)
 #   dyn_p20     7-cell lambda=0 constant-LR ladder at P=20M (df=0.2, 50 epochs,
 #               val every 152 steps = the 100M runs' 19.9M-token grid, i.e. one
@@ -82,6 +84,7 @@ walltime() {  # L W -> HH:MM:SS
         6_768) h=5;;    12_768) h=7;;   18_768) h=9;;   24_768) h=12;;  48_768) h=22;;  60_768) h=27;;
         6_1152) h=6;;   12_1152) h=11;; 18_1152) h=15;; 24_1152) h=20;;
         6_1536) h=8;;   12_1536) h=15;; 18_1536) h=21;; 24_1536) h=28;;
+        12_1728) h=18;;
         *) echo "no walltime for d${L}/w${W}" >&2; exit 1;;
     esac
     printf "%02d:00:00" "$h"
@@ -95,6 +98,7 @@ su_est() {
         6_768) echo 7;;    12_768) echo 10;;  18_768) echo 14;;  24_768) echo 18;;  48_768) echo 33;;  60_768) echo 41;;
         6_1152) echo 9;;   12_1152) echo 16;; 18_1152) echo 23;; 24_1152) echo 31;;
         6_1536) echo 12;;  12_1536) echo 22;; 18_1536) echo 32;; 24_1536) echo 43;;
+        12_1728) echo 27;;
         *) echo 0;;
     esac
 }
@@ -231,6 +235,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_ens226) for c in 6:1536 24:768; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_ens_d6) for c in 6:384 6:768; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_p20)    for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) + 3) / 4)); done;;
+        dyn_w1728)  s=$(su_est 12 1728);;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
     esac
@@ -250,6 +255,8 @@ run_block() {
                     dyn_ensemble "6:768 6:384";;
         dyn_p20)    echo "== dyn_p20: lambda=0 constant-LR ladder at P=20M =="
                     dyn_p20;;
+        dyn_w1728)  echo "== dyn_w1728: the 5x-compute width cell at L=12 (W=1728, 27 heads) for Figure 2B =="
+                    dyn_single dyn "12:1728";;
         dyn_e1)     run_block dyn_rerun; run_block dyn_fill; run_block dyn_p20
                     BLOCK_SU=$(( $(block_su dyn_rerun) + $(block_su dyn_fill) + $(block_su dyn_p20) ));;
         cap_lambda) echo "== cap_lambda: post-fix lambda-transfer check, cooldown ON =="
