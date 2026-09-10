@@ -36,8 +36,10 @@
 #               epoch here): the second corpus size for the floor-vs-data question.
 #   cap_lambda  post-fix lambda-transfer check, cooldown ON, lambda in {0.15,0.3}
 #               at d6/768, d48/768, d12/1536
-#   cap_grid    tuned-lambda cooldown grid at ONE lambda (WD=..., decide after
-#               cap_lambda) over the 12 cells
+#   cap_grid    cooldown grid at ONE lambda (WD=...) over the 12 cells. Launched at
+#               WD=0.2 alongside cap_lambda, so the three cap_lambda cells end up with
+#               a {0.15, 0.2, 0.3} sweep each and the grid is at the most common
+#               pre-correction optimum.
 #
 #   DRY_RUN=1 BLOCK=dyn_rerun bash experiments/parallel/launch_aligned_grid.sh
 #   BLOCK=dyn_rerun bash experiments/parallel/launch_aligned_grid.sh
@@ -216,6 +218,7 @@ cap_cells() {  # tag "L:W ..." "wd wd ..."
             local exp; exp=$(common_exports "$L" "$W")
             exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
             exp+=",NO_WARMDOWN=0,WEIGHT_DECAY=$wd,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
+            exp+=",KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
             [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
             local su; su=$(su_est "$L" "$W"); TOTAL_SU=$((TOTAL_SU + su))
             echo "  d${L}/w${W}  lambda=${wd} cooldown 40ep  model 0   ~${su} SU  $(walltime "$L" "$W")"
