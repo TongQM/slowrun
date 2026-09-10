@@ -166,15 +166,14 @@ def main():
         ax.scatter(xs[1:], ys[1:], s=75, color=col, edgecolor="black", linewidth=0.6, zorder=5)
         ax.annotate(fr"$L${L}/$W${W}", xy=(xs[0], ys[0]), xytext=(-6, 6), textcoords="offset points",
                     fontsize=11, color=col, ha="right")
-    ax.scatter([], [], s=60, color="0.5", edgecolor="black", linewidth=0.5, label="ensemble of that cell at $E\cdot N$, $E$=2,3,4,5")
-    ax.scatter([], [], s=190, marker="s", color="0.5", edgecolor="black", linewidth=1.1, label="$E$=4")
+    ax.scatter([], [], s=60, color="0.5", edgecolor="black", linewidth=0.5, label="ensemble of that cell at $E\cdot N$, $E$=2,3,4(,5)")
     ax.set_xscale("log")
     ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8, 1e9]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M" if x < 1e9 else f"{x/1e9:g}B"))
     ax.xaxis.set_minor_formatter(plt.NullFormatter())
     ax.set_xlabel(r"effective size  $E\cdot N$   (parameters $\times$ ensemble size)", fontsize=20)
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$", fontsize=22)
     ax.set_title("Ensembling against model size: each branch is one cell's ensemble series", fontsize=16, loc="left")
-    ax.legend(loc="upper right", frameon=True, framealpha=0.92, fontsize=12)
+    ax.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=12)
     for ext in ("pdf", "png"):
         p = OUTDIR / f"expt_fig6_ensemble_vs_size.{ext}"
         fig.savefig(p, bbox_inches="tight", dpi=300)
