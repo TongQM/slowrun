@@ -156,17 +156,14 @@ def main():
     gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max() * 1.25)), 300)
     ax.plot(gN, fit1(gN), "k--", lw=2.6, zorder=2, label=fr"single-model law  $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$")
     ax.plot(gN, fit1(gN) - Delta, color="0.55", ls=":", lw=2.6, zorder=2,
-            label=fr"law shifted down by the mean $E$=4 gap, {Delta:.2f}")
+            label=fr"law shifted down by {Delta:.2f} (mean gap at $E$=4, the largest $E$ all cells share)")
     pal_cells = sns.color_palette("cool", len(cells_E))
     for col, (L, W) in zip(pal_cells, cells_E):
         rr = sorted([r for r in rows if (r["L"], r["W"]) == (L, W)], key=lambda r: r["E"])
         xs = [single[(L, W)]["N"]] + [r["N_eff"] for r in rr]
         ys = [single[(L, W)]["l_star"]] + [r["l_star"] for r in rr]
         ax.plot(xs, ys, "-", color=col, lw=2.4, zorder=3)
-        ax.scatter(xs[1:], ys[1:], s=60, color=col, edgecolor="black", linewidth=0.5, zorder=5)
-        r4 = next((r for r in rr if r["E"] == 4), None)
-        if r4:
-            ax.scatter([r4["N_eff"]], [r4["l_star"]], s=190, marker="s", color=col, edgecolor="black", linewidth=1.1, zorder=6)
+        ax.scatter(xs[1:], ys[1:], s=75, color=col, edgecolor="black", linewidth=0.6, zorder=5)
         ax.annotate(fr"$L${L}/$W${W}", xy=(xs[0], ys[0]), xytext=(-6, 6), textcoords="offset points",
                     fontsize=11, color=col, ha="right")
     ax.scatter([], [], s=60, color="0.5", edgecolor="black", linewidth=0.5, label="ensemble of that cell at $E\cdot N$, $E$=2,3,4,5")
