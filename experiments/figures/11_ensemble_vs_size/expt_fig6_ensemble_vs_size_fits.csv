@@ -3,22 +3,22 @@ E1_collapsed,form,floor-free L*=A*N_M^-beta,18 cells
 E1_collapsed,A,4.239455,
 E1_collapsed,beta,0.016594,
 E1_collapsed,R2,0.941839,
-E2_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
-E2_law,A,4.182352,
-E2_law,beta,0.018844,
-E2_law,R2,0.856525,
-E3_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
-E3_law,A,4.121240,
-E3_law,beta,0.017532,
-E3_law,R2,0.840274,
-E4_law,form,floor-free L*=A*(EN)_M^-beta,5 cells
-E4_law,A,4.114470,
-E4_law,beta,0.017834,
-E4_law,R2,0.868300,
-E4_H1_shift,Delta,0.139290,lower floor same excess; SSE=0.003296
-E4_H2_prefactor,rho,0.964077,same floor smaller excess; SSE=0.003384
-E4_shared_floor,c,4.114470,two-parameter; SSE=0.003252
-E4_shared_floor,alpha,0.017834,compare alpha=0.0166 for E=1
+E2_law,form,floor-free L*=A*(EN)_M^-beta,6 cells
+E2_law,A,4.188696,
+E2_law,beta,0.019219,
+E2_law,R2,0.891333,
+E3_law,form,floor-free L*=A*(EN)_M^-beta,6 cells
+E3_law,A,4.126587,
+E3_law,beta,0.017823,
+E3_law,R2,0.878164,
+E4_law,form,floor-free L*=A*(EN)_M^-beta,6 cells
+E4_law,A,4.119283,
+E4_law,beta,0.018081,
+E4_law,R2,0.899905,
+E4_H1_shift,Delta,0.140663,lower floor same excess; SSE=0.003353
+E4_H2_prefactor,rho,0.963590,same floor smaller excess; SSE=0.003495
+E4_shared_floor,c,4.119283,two-parameter; SSE=0.003263
+E4_shared_floor,alpha,0.018081,compare alpha=0.0166 for E=1
 matched_N,L6/W384_x4_vs_L6/W768,0.108039,ens4=3.8602 single=3.9682 at N_eff=57M
 matched_N,L6/W384_x4_vs_L24/W384,0.102539,ens4=3.8602 single=3.9627 at N_eff=57M
 matched_N,L12/W384_x4_vs_L12/W768,0.157647,ens4=3.7519 single=3.9095 at N_eff=113M
@@ -26,4 +26,5 @@ matched_N,L6/W768_x4_vs_L6/W1536,0.190724,ens4=3.7308 single=3.9215 at N_eff=226
 matched_N,L6/W768_x4_vs_L24/W768,0.132424,ens4=3.7308 single=3.8632 at N_eff=226M
 matched_N,L12/W768_x4_vs_L12/W1536,0.157153,ens4=3.6649 single=3.8221 at N_eff=453M
 matched_N,L12/W768_x4_vs_L48/W768,0.145953,ens4=3.6649 single=3.8109 at N_eff=453M
+matched_N,L24/W768_x4_vs_L24/W1536,0.154204,ens4=3.6390 single=3.7932 at N_eff=906M
 matched_N,L6/W1536_x4_vs_L24/W1536,0.121631,ens4=3.6716 single=3.7932 at N_eff=906M
