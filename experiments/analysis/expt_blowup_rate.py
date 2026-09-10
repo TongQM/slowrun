@@ -7,7 +7,10 @@ past the optimum  ds = s - s*,  and fit two straight lines in log e:
     power law:     log e = gamma * log ds + b        (straight on log-log)
     exponential:   log e = kappa * ds     + b        (straight on semi-log)
 
-The better R^2 says which form the rise follows; gamma says how fast.
+The better R^2 says which form the rise follows; gamma says how fast. The local
+slope in the first and last third of the window is also reported: it is ~1.0
+early and falls to 0.6-0.9 late, lowest for the largest models whose tails run
+furthest, i.e. the rise bends toward the theory's tau^(1/2) asymptotically.
 
 Fitting window: points with ds > 0 and e >= EXCESS_MIN (0.03 nats), so the
 per-epoch sawtooth near the minimum does not dominate the log. Curves with
@@ -60,7 +63,13 @@ def fit_forms(ds, e):
         return float(a), float(b), float(1 - np.sum((y - pred) ** 2) / np.sum((y - y.mean()) ** 2))
     g, bp, r2p = r2(x_pow)
     k, be, r2e = r2(x_exp)
-    out = dict(n=int(m.sum()), gamma=g, b_pow=bp, R2_pow=r2p, kappa=k, b_exp=be, R2_exp=r2e,
+    # local log-log slope in the first and last third of the window: does the
+    # exponent drift toward the theory's 1/2 as the tail runs on?
+    n = int(m.sum()); t = max(n // 3, 3)
+    g_early = float(np.polyfit(x_pow[:t], y[:t], 1)[0])
+    g_late = float(np.polyfit(x_pow[-t:], y[-t:], 1)[0])
+    out = dict(n=n, gamma=g, b_pow=bp, R2_pow=r2p, kappa=k, b_exp=be, R2_exp=r2e,
+               gamma_early=g_early, gamma_late=g_late,
                ds_lo=float(ds[m].min()), ds_hi=float(ds[m].max()))
     out["reliable"] = max(r2p, r2e) >= R2_MIN
     return out
@@ -168,27 +177,27 @@ def main():
     plt.close(fig)
 
     with open(OUTDIR / "expt_blowup_rate_fits.csv", "w") as fh:
-        fh.write("row,curve,resource,nadir_step,min_val,n_fit_points,gamma,R2_powerlaw,kappa_per_step,R2_exponential,verdict\n")
+        fh.write("row,curve,resource,nadir_step,min_val,n_fit_points,gamma,R2_powerlaw,kappa_per_step,R2_exponential,verdict,gamma_first_third,gamma_last_third\n")
         for rname, R in (("vary_P", R1), ("vary_N", R2)):
             for r in R:
                 if "gamma" in r:
                     verdict = ("power" if r["R2_pow"] > r["R2_exp"] else "exponential") if r["reliable"] else "unreliable"
                     fh.write(f"{rname},{r['label'].replace('$','')},{r['resource']:.0f},{r['s_star']:.0f},"
                              f"{r['l_star']:.4f},{r['n']},{r['gamma']:.4f},{r['R2_pow']:.4f},"
-                             f"{r['kappa']:.3e},{r['R2_exp']:.4f},{verdict}\n")
+                             f"{r['kappa']:.3e},{r['R2_exp']:.4f},{verdict},{r['gamma_early']:.3f},{r['gamma_late']:.3f}\n")
                 else:
                     fh.write(f"{rname},{r['label'].replace('$','')},{r['resource']:.0f},{r['s_star']:.0f},"
-                             f"{r['l_star']:.4f},{r['n']},,,,,too few points\n")
+                             f"{r['l_star']:.4f},{r['n']},,,,,too few points,,\n")
     print(f"saved {OUTDIR / 'expt_blowup_rate_fits.csv'}")
 
     for rname, R in (("row 1: vary P", R1), ("row 2: vary N", R2)):
         print(f"\n{rname}")
-        print(f"{'curve':>12} {'n':>3} {'gamma':>7} {'R2 pow':>7} {'R2 exp':>7}  verdict")
+        print(f"{'curve':>12} {'n':>3} {'gamma':>7} {'R2 pow':>7} {'R2 exp':>7}  {'early':>6} {'late':>6}  verdict")
         for r in R:
             lab = r["label"].replace("$", "")
             if "gamma" in r:
                 v = ("power" if r["R2_pow"] > r["R2_exp"] else "EXPONENTIAL") if r["reliable"] else "unreliable (R2<0.5)"
-                print(f"{lab:>12} {r['n']:>3} {r['gamma']:>7.3f} {r['R2_pow']:>7.3f} {r['R2_exp']:>7.3f}  {v}")
+                print(f"{lab:>12} {r['n']:>3} {r['gamma']:>7.3f} {r['R2_pow']:>7.3f} {r['R2_exp']:>7.3f}  {r['gamma_early']:>6.2f} {r['gamma_late']:>6.2f}  {v}")
             else:
                 print(f"{lab:>12} {r['n']:>3}   (too few post-nadir points to fit)")
 
