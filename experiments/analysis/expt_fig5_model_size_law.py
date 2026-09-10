@@ -26,6 +26,7 @@ Outputs:
   experiments/figures/04_scaling_law/expt_fig5_model_size_collapsed.{pdf,png}
   experiments/figures/04_scaling_law/expt_fig5_model_size_separable.{pdf,png}
   experiments/figures/04_scaling_law/expt_fig5_model_size_profile.{pdf,png}
+  experiments/figures/04_scaling_law/expt_fig5_model_size_law.{pdf,png}   (1x3: A collapsed, B/C separable -- the manuscript figure)
   experiments/figures/04_scaling_law/expt_fig5_model_size_law_fits.csv
 """
 from __future__ import annotations
@@ -168,6 +169,46 @@ def main():
     for ext in ("pdf", "png"):
         fig.savefig(OUTDIR / f"expt_fig5_model_size_separable.{ext}", bbox_inches="tight", dpi=300)
     plt.close(fig); print(f"Saved {OUTDIR / 'expt_fig5_model_size_separable.pdf'}")
+
+    # ---------------------------------------------------------------- combined 1x3 (manuscript)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6.2))
+    fig.subplots_adjust(wspace=0.32)
+    ax = axes[0]
+    for k, n, v in zip(ks, N, y):
+        ax.scatter(n, v, s=150, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    ax.plot(g, A * g ** (-beta), "k--", lw=2.5, zorder=2)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_yticks([3.8, 3.9, 4.0, 4.1]); ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1f}"))
+    ax.yaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xticks([20, 50, 100, 200, 500]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}M"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter()); ax.tick_params(axis="x", labelsize=15)
+    ax.set_xlabel(r"parameters  $N=16LW^2$", fontsize=18); ax.set_ylabel(r"min val loss  $\mathcal{L}^*$", fontsize=18)
+    ax.set_title(fr"(A)  collapsed:  $\mathcal{{L}}^*\propto N^{{-{beta:.3f}}}$   ($R^2$={r2lin:.2f})", fontsize=15, loc="left")
+    l1 = ax.legend(handles=leg_w, loc="upper right", title="width", fontsize=10, title_fontsize=10); ax.add_artist(l1)
+    ax.legend(handles=leg_l, loc="lower left", title="depth", fontsize=10, title_fontsize=10)
+    ax = axes[1]
+    for k, x, v in zip(ks, L, yL):
+        ax.scatter(x, v, s=140, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    ax.plot(gl, As * gl ** (-bL), "k--", lw=2.5, zorder=2)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xticks([6, 12, 18, 24, 48, 60]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel(r"depth  $L$", fontsize=18); ax.set_ylabel(r"$\mathcal{L}^*\,W^{b_W}$  (width factor removed)", fontsize=16)
+    ax.set_title(fr"(B)  separable, depth:  $b_L$={bL:.3f}", fontsize=15, loc="left")
+    ax = axes[2]
+    for k, x, v in zip(ks, W, yW):
+        ax.scatter(x, v, s=140, color=cool_by_L[k[0]], marker=marker_by_W[k[1]], edgecolor="0.2", lw=1.3, zorder=3)
+    ax.plot(gw, As * gw ** (-bW), "k--", lw=2.5, zorder=2)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xticks([384, 768, 1152, 1536]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel(r"width  $W$", fontsize=18); ax.set_ylabel(r"$\mathcal{L}^*\,L^{b_L}$  (depth factor removed)", fontsize=16)
+    ax.set_title(fr"(C)  separable, width:  $b_W$={bW:.3f}   ($R^2$={r2s:.2f})", fontsize=15, loc="left")
+    for a_ in axes[1:]:
+        a_.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}")); a_.yaxis.set_minor_formatter(plt.NullFormatter())
+    for ext in ("pdf", "png"):
+        fig.savefig(OUTDIR / f"expt_fig5_model_size_law.{ext}", bbox_inches="tight", dpi=300)
+    plt.close(fig); print(f"Saved {OUTDIR / 'expt_fig5_model_size_law.pdf'}")
 
     # ---------------------------------------------------------------- (3) profile
     fig, ax = plt.subplots(figsize=(8, 5.6))

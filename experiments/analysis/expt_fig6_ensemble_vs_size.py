@@ -146,78 +146,38 @@ def main():
                                 single=f"L{k[0]}/W{k[1]}", single_l=v["l_star"],
                                 advantage=v["l_star"] - r["l_star"]))
 
-    # ------------------------------------------------------------- figure
-    fig, axes = plt.subplots(1, 3, figsize=(30, 8.8))
-    fig.subplots_adjust(wspace=0.30)
-    col_E = {E: c for E, c in zip(E_SHOW, sns.color_palette("cool", len(E_SHOW)))}
-    gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max())), 300)
-
-    # (A) L* vs N_eff
-    ax = axes[0]
-    ax.scatter(N1, L1, s=170, color="0.25", edgecolor="black", linewidth=0.9, zorder=4,
-               label=f"single model  ($E$=1), {len(N1)} cells")
-    ax.plot(gN, fit1(gN), "k--", lw=2.8, zorder=2,
-            label=fr"$E$=1 law: $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$  ({len(N1)} cells)")
-    for E in E_SHOW:
-        rr = [r for r in rows if r["E"] == E]
-        ax.scatter([r["N_eff"] for r in rr], [r["l_star"] for r in rr], s=200 if E == 4 else 110,
-                   marker="s" if E == 4 else "o", color=col_E[E], edgecolor="black",
-                   linewidth=1.0 if E == 4 else 0.6, zorder=5 if E == 4 else 3,
-                   label=fr"$E$={E} ensemble at $E\cdot N$" + ("  (4 cells)" if E == 4 else ""))
-    for r in r4:   # connector from the base single model to its 4x ensemble
-        ax.annotate("", xy=(r["N_eff"], r["l_star"]), xytext=(r["N"], r["single_l_star"]),
-                    arrowprops=dict(arrowstyle="->", lw=1.4, color="0.55", shrinkA=8, shrinkB=8))
-    ax.plot(gN, fit1(gN) - Delta, color=col_E[4], ls="-", lw=2.4, zorder=2,
-            label=fr"$E$=4: $E$=1 law shifted down by {Delta:.3f}")
+    # ------------------------------------------------------------- figure (single panel)
+    # Each replicated cell draws its own ensemble curve E=1..5 at effective size E*N,
+    # starting on the single-model law -- the construction of Figure 2B, one curve per
+    # base cell -- so the reader sees five short "ensembling branches" leaving the law.
+    fig, ax = plt.subplots(figsize=(11, 7.6))
+    ax.scatter(N1, L1, s=150, color="0.25", edgecolor="black", linewidth=0.9, zorder=4,
+               label=f"single model ($E$=1), {len(N1)} cells")
+    gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max() * 1.25)), 300)
+    ax.plot(gN, fit1(gN), "k--", lw=2.6, zorder=2, label=fr"single-model law  $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$")
+    ax.plot(gN, fit1(gN) - Delta, color="0.55", ls=":", lw=2.6, zorder=2,
+            label=fr"law shifted down by the mean $E$=4 gap, {Delta:.2f}")
+    pal_cells = sns.color_palette("cool", len(cells_E))
+    for col, (L, W) in zip(pal_cells, cells_E):
+        rr = sorted([r for r in rows if (r["L"], r["W"]) == (L, W)], key=lambda r: r["E"])
+        xs = [single[(L, W)]["N"]] + [r["N_eff"] for r in rr]
+        ys = [single[(L, W)]["l_star"]] + [r["l_star"] for r in rr]
+        ax.plot(xs, ys, "-", color=col, lw=2.4, zorder=3)
+        ax.scatter(xs[1:], ys[1:], s=60, color=col, edgecolor="black", linewidth=0.5, zorder=5)
+        r4 = next((r for r in rr if r["E"] == 4), None)
+        if r4:
+            ax.scatter([r4["N_eff"]], [r4["l_star"]], s=190, marker="s", color=col, edgecolor="black", linewidth=1.1, zorder=6)
+        ax.annotate(fr"$L${L}/$W${W}", xy=(xs[0], ys[0]), xytext=(-6, 6), textcoords="offset points",
+                    fontsize=11, color=col, ha="right")
+    ax.scatter([], [], s=60, color="0.5", edgecolor="black", linewidth=0.5, label="ensemble of that cell at $E\cdot N$, $E$=2,3,4,5")
+    ax.scatter([], [], s=190, marker="s", color="0.5", edgecolor="black", linewidth=1.1, label="$E$=4")
     ax.set_xscale("log")
-    ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8])
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
+    ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8, 1e9]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M" if x < 1e9 else f"{x/1e9:g}B"))
     ax.xaxis.set_minor_formatter(plt.NullFormatter())
-    ax.set_xlabel(r"effective size  $E\cdot N$  (parameters $\times$ ensemble)", fontsize=24)
-    ax.set_ylabel(r"min val loss  $\mathcal{L}^\ast$", fontsize=26)
-    ax.set_title("(A)  ensembling moves points off the single-model law", fontsize=20, loc="left")
-    ax.legend(loc="upper right", frameon=True, framealpha=0.92, fontsize=13)
-
-    # (B) gap to the E=1 law vs N_eff, one series per E
-    ax = axes[1]
-    for E in E_SHOW:
-        rr = sorted([r for r in rows if r["E"] == E], key=lambda r: r["N_eff"])
-        ax.plot([r["N_eff"] for r in rr], [r["gap"] for r in rr], "-o", color=col_E[E], lw=2.6,
-                ms=11 if E == 4 else 8, markeredgecolor="black", label=fr"$E$={E}")
-    ax.axhline(0, color="0.5", lw=1.5, ls=":")
-    ax.set_xscale("log")
-    ax.set_xticks([5e7, 1e8, 2e8, 5e8])
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M"))
-    ax.xaxis.set_minor_formatter(plt.NullFormatter())
-    ax.set_xlabel(r"effective size  $E\cdot N$", fontsize=24)
-    ax.set_ylabel(r"$\mathcal{L}^\ast_{E=1}(E N) - \mathcal{L}^\ast_E$   (nats below the law)", fontsize=22)
-    ax.set_title("(B)  the gain below the law grows slowly with size and with $E$", fontsize=20, loc="left")
-    ax.set_ylim(0, None)
-    ax.legend(loc="lower right", frameon=True, framealpha=0.92, fontsize=15, title="ensemble size")
-
-    # (C) vs training compute to the optimum, C = E * N * s*
-    ax = axes[2]
-    C1 = np.array([single[k]["N"] * single[k]["s_star"] for k in single], float)
-    ax.scatter(C1, L1, s=170, color="0.25", edgecolor="black", linewidth=0.9, zorder=4,
-               label="single model ($E$=1)")
-    for E in (4,):
-        rr = [r for r in rows if r["E"] == E]
-        ax.scatter([r["N_eff"] * r["s_star"] for r in rr], [r["l_star"] for r in rr], s=200,
-                   marker="s", color=col_E[E], edgecolor="black", linewidth=1.0, zorder=5,
-                   label=fr"$E$={E} ensemble")
-    for r in r4:
-        ax.annotate("", xy=(r["N_eff"] * r["s_star"], r["l_star"]),
-                    xytext=(r["N"] * r["single_s_star"], r["single_l_star"]),
-                    arrowprops=dict(arrowstyle="->", lw=1.4, color="0.55", shrinkA=8, shrinkB=8))
-    ax.set_xscale("log")
-    ax.set_xticks([1e11, 2e11, 5e11, 1e12, 2e12, 5e12])
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e12:g}T"))
-    ax.xaxis.set_minor_formatter(plt.NullFormatter())
-    ax.set_xlabel(r"compute to the optimum  $E\,N\,s^\ast$  (param$\cdot$steps)", fontsize=24)
-    ax.set_ylabel(r"min val loss  $\mathcal{L}^\ast$", fontsize=26)
-    ax.set_title("(C)  the same picture at matched compute", fontsize=20, loc="left")
-    ax.legend(loc="upper right", frameon=True, framealpha=0.92, fontsize=15)
-
+    ax.set_xlabel(r"effective size  $E\cdot N$   (parameters $\times$ ensemble size)", fontsize=20)
+    ax.set_ylabel(r"min val loss  $\mathcal{L}^*$", fontsize=22)
+    ax.set_title("Ensembling against model size: each branch is one cell's ensemble series", fontsize=16, loc="left")
+    ax.legend(loc="upper right", frameon=True, framealpha=0.92, fontsize=12)
     for ext in ("pdf", "png"):
         p = OUTDIR / f"expt_fig6_ensemble_vs_size.{ext}"
         fig.savefig(p, bbox_inches="tight", dpi=300)
