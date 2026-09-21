@@ -228,6 +228,33 @@ cap_cells() {  # tag "L:W ..." "wd wd ..."
     done
 }
 
+# ------------------------------------------------------------------ capacity ensembles
+#   4 init_shuffle members per cell in the capacity recipe (WD + 20% cooldown), replayed
+#   at E=2,3,4 on the epoch checkpoints the run keeps (every KEEP_EPOCH_EVERY-th epoch;
+#   every capacity run reaches its minimum at epoch 40). Matched tuned singles are the
+#   cap_grid runs at the same WD. No step checkpoints and no cleanup job: storage is
+#   8 epoch checkpoints per member. Cells are independent (no chaining needed).
+cap_ensemble() {  # "L:W ..."
+    local cells=$1 L W
+    for c in $cells; do
+        L=${c%%:*}; W=${c##*:}
+        local ts="${GRID_TAG}_capens_d${L}_w${W}_wd${WD}"
+        local exp; exp=$(common_exports "$L" "$W")
+        exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
+        exp+=",NO_WARMDOWN=0,WEIGHT_DECAY=$WD,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
+        exp+=",KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+        exp+=",ENS_SIZES_STR=2 3 4,SKIP_INDIV_VAL=1,END_EPOCH=40,EVAL_MODE=epoch"
+        [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_shuffle_ens_${ts}"
+        local su; su=$(( $(su_est "$L" "$W") * 4 )); TOTAL_SU=$((TOTAL_SU + su))
+        local arr="${NUM_MODELS}-$((NUM_MODELS + 3))"
+        echo "  d${L}/w${W}  lambda=${WD} cooldown 40ep  init_shuffle models 0-3   ~${su} SU  $(walltime "$L" "$W")"
+        TJOB=$(submit "al_capens_d${L}_w${W}" "$(walltime "$L" "$W")" "$arr" "$exp")
+        local rexp; rexp=$(echo "$exp" | sed "s/NUM_MODELS=$NUM_MODELS,/NUM_MODELS=4,/")
+        RJOB=$(submit "al_capensreplay_d${L}_w${W}" "03:00:00" 1 "$rexp" "--dependency=afterok:$TJOB" experiments/parallel/replay_array_fused.sh)
+        echo "    train job=$TJOB   replay job=$RJOB (after train; epochs 5,10,...,40)"
+    done
+}
+
 ALL12="6:384 12:384 6:768 12:768 6:1152 18:768 6:1536 24:768 12:1152 12:1536 48:768 60:768"
 
 block_su() {  # SU of a block from the tables, no side effects
@@ -240,6 +267,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_p20)    for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) + 3) / 4)); done;;
         dyn_w1728)  s=$(su_est 12 1728);;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
+        cap_ens)    for c in ${CELLS:-6:384 12:384 6:768 12:768}; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
     esac
     echo $s
@@ -267,6 +295,9 @@ run_block() {
         cap_grid)   : "${WD:?set WD=<lambda> for cap_grid (decide after cap_lambda)}"
                     echo "== cap_grid: cooldown ON at lambda=$WD over the 12 cells =="
                     cap_cells cap "$ALL12" "$WD";;
+        cap_ens)    : "${WD:?set WD=<lambda> for cap_ens}"
+                    echo "== cap_ens: capacity-recipe ensembles (4 members, E=2,3,4) at lambda=$WD =="
+                    cap_ensemble "${CELLS:-6:384 12:384 6:768 12:768}";;
         *) echo "unknown BLOCK=$1"; exit 1;;
     esac
 }
