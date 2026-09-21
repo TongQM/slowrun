@@ -28,7 +28,7 @@ conda activate slowrun
 
 cd /ocean/projects/cis260161p/ymiao6/scaling/slowrun
 
-mkdir -p experiments/logs experiments/figures/02_ensemble_scaling/bootstrap
+mkdir -p experiments/logs "${BOOT_OUT:-experiments/figures/02_ensemble_scaling/bootstrap}"
 export PYTHONUNBUFFERED=1
 export TIKTOKEN_CACHE_DIR=/ocean/projects/cis260161p/ymiao6/.tiktoken_cache
 
@@ -44,7 +44,8 @@ fi
 
 # Find the Q2 checkpoint dir for this strategy. Symlink at cis260095p points to
 # the actual data on cis260161p (post Q2 ckpt move).
-CKPT_DIR=/ocean/projects/cis260095p/ymiao6/scaling/slowrun/checkpoints/parallel_${STRATEGY}_q2_20260502_234110_d12_w768_df0.2
+# CKPT_PREFIX/CKPT_TAG/BOOT_OUT override the original Q2 location (launch_fig4_rerun.sh).
+CKPT_DIR=${CKPT_PREFIX:-/ocean/projects/cis260095p/ymiao6/scaling/slowrun/checkpoints}/parallel_${STRATEGY}_${CKPT_TAG:-q2_20260502_234110_d12_w768_df0.2}
 
 echo "============================================================"
 echo "Bootstrap iter $ITER  strategy=$STRATEGY  ckpt_dir=$CKPT_DIR"
@@ -56,6 +57,7 @@ python experiments/parallel/replay_bootstrap.py \
     --num-models 20 \
     --ens-sizes 2 5 10 15 20 \
     --num-epochs 40 \
-    --bootstrap-iter "$ITER"
+    --bootstrap-iter "$ITER" \
+    --out-dir "${BOOT_OUT:-experiments/figures/02_ensemble_scaling/bootstrap}"
 
 echo "Done: $STRATEGY iter $ITER (exit $?)"
