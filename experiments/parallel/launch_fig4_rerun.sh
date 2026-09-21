@@ -77,18 +77,24 @@ exports+=",ENS_SIZES_STR=$ENS_SIZES_STR,SKIP_INDIV_VAL=1,END_EPOCH=$NUM_EPOCHS,W
 
 # 20 ind × 2 strats = 40 train tasks.
 TRAIN_RANGE="0-$((2*NUM_MODELS - 1))"
-REPLAY_RANGE="0-$((2*NUM_SIZES - 1))"
+REPLAY_RANGE="${REPLAY_RANGE:-0-$((2*NUM_SIZES - 1))}"
+BOOT_RANGE="${BOOT_RANGE:-0-19}"
+SKIP_TRAIN="${SKIP_TRAIN:-0}"   # 1: training already done; resubmit replays/bootstraps only
 CLEANUP_RANGE="0-1"
 
+DEP=""
+if [ "$SKIP_TRAIN" != "1" ]; then
 TJOB=$(submit_one "fig4_train_d12_w768" "" "06:00:00" "$TRAIN_RANGE" "$exports" experiments/parallel/train_array.sh)
 echo "  train  array=$TRAIN_RANGE  job=$TJOB  group=$GROUP" >&2
+DEP="--dependency=afterok:$TJOB"
+fi
 
-RJOB=$(submit_one "fig4_replay_d12_w768" "--dependency=afterok:$TJOB" "08:00:00" "$REPLAY_RANGE" "$exports" experiments/parallel/replay_array.sh)
-echo "  replay array=$REPLAY_RANGE  job=$RJOB  (after $TJOB)" >&2
+RJOB=$(submit_one "fig4_replay_d12_w768" "$DEP" "12:00:00" "$REPLAY_RANGE" "$exports" experiments/parallel/replay_array.sh)
+echo "  replay array=$REPLAY_RANGE  job=$RJOB  ${DEP:+($DEP)}" >&2
 
 bexports="$exports,CKPT_PREFIX=$DEST,CKPT_TAG=${CELL_TS},BOOT_OUT=experiments/figures/02_ensemble_scaling/bootstrap_${GRID_TAG}"
-BJOB=$(submit_one "fig4_bootstrap_d12_w768" "--dependency=afterok:$TJOB" "10:00:00" "0-19" "$bexports" experiments/parallel/replay_bootstrap.sh)
-echo "  boot   array=0-19  job=$BJOB  (after $TJOB)" >&2
+BJOB=$(submit_one "fig4_bootstrap_d12_w768" "$DEP" "10:00:00" "$BOOT_RANGE" "$bexports" experiments/parallel/replay_bootstrap.sh)
+echo "  boot   array=0-19  job=$BJOB  ${DEP:+($DEP)}" >&2
 
 echo
 echo "Figure 4 rerun submitted. Wandb group: $GROUP"
