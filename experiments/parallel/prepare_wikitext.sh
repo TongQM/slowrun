@@ -3,8 +3,8 @@
 #SBATCH --partition=RM-shared
 #SBATCH --account=cis260161p
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=48000M
 #SBATCH --time=03:00:00
 #SBATCH --output=experiments/logs/%x_%j.out
 #SBATCH --error=experiments/logs/%x_%j.err
