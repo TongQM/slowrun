@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=prep_wikitext
-#SBATCH --partition=RM-shared
+#SBATCH --partition=GPU-shared
+#SBATCH --gpus=h100-80:1
 #SBATCH --account=cis260161p
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=48000M
-#SBATCH --time=03:00:00
+#SBATCH --cpus-per-task=5
+#SBATCH --mem=40G
+#SBATCH --time=02:00:00
 #SBATCH --output=experiments/logs/%x_%j.out
 #SBATCH --error=experiments/logs/%x_%j.err
 set -euo pipefail
