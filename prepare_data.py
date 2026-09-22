@@ -1,5 +1,8 @@
 """
-Preprocess FineWeb into pre-tokenized train/val splits using the GPT-2 tokenizer.
+Preprocess a corpus into pre-tokenized train/val splits using the GPT-2 tokenizer.
+Default FineWeb; --dataset wikitext gives WikiText-103 (raw) in the same format, with the
+first val_tokens of the shuffled-document stream as validation and the next train_tokens
+as training data (no document overlap), so the two corpora are prepared identically.
 
 Usage:
     python prepare_data.py
@@ -137,14 +140,14 @@ def verify_hash(filepath):
 # -----------------------------------------------------------------------------
 # Main
 
-def preprocess(train_tokens, val_tokens, local_dir):
+def preprocess(train_tokens, val_tokens, local_dir, dataset_name="fineweb"):
     encoder = tiktoken.get_encoding("gpt2")
 
     val_seqs = val_tokens // SEQUENCE_SIZE
     train_seqs = train_tokens // SEQUENCE_SIZE
 
     print(f"{'='*60}")
-    print(f"Preprocessing FineWeb with GPT-2 tokenizer")
+    print(f"Preprocessing {dataset_name} with GPT-2 tokenizer")
     print(f"{'='*60}")
     print(f"Sequence length: {SEQUENCE_LENGTH} (size {SEQUENCE_SIZE})")
     print(f"Val:   {val_tokens:>13,} raw tokens -> {val_seqs:,} sequences")
@@ -155,8 +158,26 @@ def preprocess(train_tokens, val_tokens, local_dir):
     os.makedirs(local_dir, exist_ok=True)
 
     # Stream dataset
-    dataset = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=True)
-    dataset_iter = iter(dataset)
+    if dataset_name == "fineweb":
+        dataset = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=True)
+        dataset_iter = iter(dataset)
+        prefix = "fineweb"
+    elif dataset_name == "wikitext":
+        # WikiText-103 is stored line by line; rebuild documents at " = Title = " headings,
+        # then shuffle documents (seed 42) so val/train are not ordered by article.
+        raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+        docs, cur = [], []
+        for line in raw["text"]:
+            if line.startswith(" = ") and not line.startswith(" = = ") and cur:
+                docs.append("".join(cur)); cur = []
+            cur.append(line)
+        if cur: docs.append("".join(cur))
+        rng = np.random.RandomState(42); rng.shuffle(docs)
+        print(f"  WikiText-103: {len(docs):,} documents")
+        dataset_iter = iter({"text": d} for d in docs)
+        prefix = "wikitext"
+    else:
+        raise ValueError(dataset_name)
 
     # Pool 1: val
     print(f"\nTokenizing val ({val_tokens:,} tokens)...")
@@ -176,8 +197,8 @@ def preprocess(train_tokens, val_tokens, local_dir):
 
     # Write
     print()
-    val_path = os.path.join(local_dir, "fineweb_val.pt")
-    train_path = os.path.join(local_dir, "fineweb_train.pt")
+    val_path = os.path.join(local_dir, f"{prefix}_val.pt")
+    train_path = os.path.join(local_dir, f"{prefix}_train.pt")
     write_datafile(val_path, val_sequences, BATCH_SIZE)
     write_datafile(train_path, train_sequences, BATCH_SIZE)
 
@@ -194,10 +215,12 @@ if __name__ == "__main__":
     parser.add_argument("--train_tokens", type=int, default=100_000_000)
     parser.add_argument("--val_tokens", type=int, default=10_000_000)
     parser.add_argument("--local_dir", type=str, default="fineweb_data")
+    parser.add_argument("--dataset", type=str, default="fineweb", choices=["fineweb", "wikitext"])
     args = parser.parse_args()
 
     preprocess(
         train_tokens=args.train_tokens,
         val_tokens=args.val_tokens,
         local_dir=args.local_dir,
+        dataset_name=args.dataset,
     )

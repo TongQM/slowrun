@@ -81,6 +81,7 @@ python experiments/parallel/replay_fused.py \
     --ensemble-mode="$ENSEMBLE_MODE" \
     --eval-mode="$EVAL_MODE" \
     --start-step="$START_STEP" \
+    ${INPUT_VAL_BIN:+--input-val-bin="$INPUT_VAL_BIN"} \
     --wandb-group="$WANDB_GROUP" \
     --wandb-run-name-prefix="$RUN_PREFIX"
 

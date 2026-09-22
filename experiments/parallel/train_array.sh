@@ -97,6 +97,9 @@ fi
 if [ -n "${DROPOUT:-}" ]; then
     EXTRA_FLAGS+=(--dropout=$DROPOUT)
 fi
+if [ -n "${INPUT_BIN:-}" ]; then
+    EXTRA_FLAGS+=(--input_bin=$INPUT_BIN --input_val_bin=$INPUT_VAL_BIN)
+fi
 # KEEP_EPOCH_CKPTS_EVERY=K -> prune older per-epoch ckpts on the fly, keeping every K-th
 if [ "${KEEP_EPOCH_CKPTS_EVERY:-0}" -gt 0 ] 2>/dev/null; then
     EXTRA_FLAGS+=(--keep-epoch-ckpts-every=$KEEP_EPOCH_CKPTS_EVERY)

@@ -266,6 +266,54 @@ drop_block() {
     echo "    train job=$TJOB   replay job=$RJOB"
 }
 
+# ------------------------------------------------------------------ second corpus: WikiText-103
+#   Same recipe as the FineWeb dynamics runs (lambda=0, constant LR, val every 152 steps) on
+#   wikitext_train.pt / wikitext_val.pt (prepare_data.py --dataset wikitext). Three parts:
+#   data sweep at L12/W768 (P = 10, 20, 50, 100M via DATA_FRACTION, ~1.05B tokens each, as the
+#   FineWeb sweep), a 4-cell ladder at 100M (40 epochs), and 4 init_shuffle members at
+#   L12/W768 replayed at E=2,3,4.
+WIKI_TRAIN=/ocean/projects/cis260161p/ymiao6/scaling/slowrun/wikitext_data/wikitext_train.pt
+WIKI_VAL=/ocean/projects/cis260161p/ymiao6/scaling/slowrun/wikitext_data/wikitext_val.pt
+wiki_block() {
+    local L W ts exp su df ep
+    for df in 0.1 0.2 0.5 1.0; do
+        L=12; W=768; ep=$(python3 -c "print(int(round(10.5/$df)))")
+        ts="${GRID_TAG}_wiki_p$(python3 -c "print(int($df*100))")_d${L}_w${W}"
+        exp=$(common_exports "$L" "$W")
+        exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=$ep,DATA_FRACTION=$df"
+        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=76,CHECKPOINT_EVERY_N_STEPS=0,KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+        exp+=",INPUT_BIN=$WIKI_TRAIN,INPUT_VAL_BIN=$WIKI_VAL"
+        [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
+        su=$(( ( $(su_est "$L" "$W") + 3 ) / 4 )); TOTAL_SU=$((TOTAL_SU + su))
+        echo "  wiki data sweep P=$(python3 -c "print(int($df*100))")M  d${L}/w${W}  ${ep}ep  ~${su} SU"
+        JOB=$(submit "al_wiki_p$(python3 -c "print(int($df*100))")_d${L}_w${W}" "04:00:00" 0 "$exp"); echo "    job=$JOB"
+    done
+    for c in 6:384 12:384 6:768 12:1536; do
+        L=${c%%:*}; W=${c##*:}
+        ts="${GRID_TAG}_wiki_dyn_d${L}_w${W}"
+        exp=$(common_exports "$L" "$W")
+        exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
+        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0,KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+        exp+=",INPUT_BIN=$WIKI_TRAIN,INPUT_VAL_BIN=$WIKI_VAL"
+        [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
+        su=$(su_est "$L" "$W"); TOTAL_SU=$((TOTAL_SU + su))
+        echo "  wiki ladder d${L}/w${W}  P=100M 40ep  ~${su} SU  $(walltime "$L" "$W")"
+        JOB=$(submit "al_wiki_dyn_d${L}_w${W}" "$(walltime "$L" "$W")" 0 "$exp"); echo "    job=$JOB"
+    done
+    L=12; W=768; ts="${GRID_TAG}_wikiens_d${L}_w${W}"
+    exp=$(common_exports "$L" "$W")
+    exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0"
+    exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0,KEEP_EPOCH_CKPTS_EVERY=1"
+    exp+=",INPUT_BIN=$WIKI_TRAIN,INPUT_VAL_BIN=$WIKI_VAL,ENS_SIZES_STR=2 3 4,SKIP_INDIV_VAL=1,END_EPOCH=40,EVAL_MODE=epoch"
+    [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_shuffle_ens_${ts}"
+    su=$(( $(su_est "$L" "$W") * 4 )); TOTAL_SU=$((TOTAL_SU + su))
+    echo "  wiki ensemble d${L}/w${W}  init_shuffle models 0-3  ~${su} SU"
+    TJOB=$(submit "al_wikiens_d${L}_w${W}" "$(walltime "$L" "$W")" "${NUM_MODELS}-$((NUM_MODELS + 3))" "$exp")
+    local rexp; rexp=$(echo "$exp" | sed "s/NUM_MODELS=$NUM_MODELS,/NUM_MODELS=4,/")
+    RJOB=$(submit "al_wikiensreplay_d${L}_w${W}" "06:00:00" 1 "$rexp" "--dependency=afterok:$TJOB" experiments/parallel/replay_array_fused.sh)
+    echo "    train job=$TJOB   replay job=$RJOB"
+}
+
 cap_cells() {  # tag "L:W ..." "wd wd ..."
     local tag=$1 cells=$2 wds=$3 L W wd
     for c in $cells; do
@@ -325,6 +373,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_w1728)  s=$(su_est 12 1728);;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_p40|dyn_p60) for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) * 3 + 9) / 10)); done;;
+        wiki)       s=$(( 4 * ($(su_est 12 768) + 3) / 4 + $(su_est 6 384) + $(su_est 12 384) + $(su_est 6 768) + $(su_est 12 1536) + 4 * $(su_est 12 768) ));;
         dropout)    s=$(( 6 * $(su_est 12 768) ));;
         cap_ens)    for c in ${CELLS:-6:384 12:384 6:768 12:768}; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
@@ -356,6 +405,7 @@ run_block() {
                     cap_cells cap "${CELLS:-$ALL12}" "$WD";;
         dyn_p40)    echo "== dyn_p40: lambda=0 constant-LR ladder at P=40M =="; dyn_pmid 0.4;;
         dyn_p60)    echo "== dyn_p60: lambda=0 constant-LR ladder at P=60M =="; dyn_pmid 0.6;;
+        wiki)       echo "== wiki: WikiText-103 data sweep, 4-cell ladder, and one ensemble cell =="; wiki_block;;
         dropout)    echo "== dropout: L12/W768 at dropout 0.1, dyn + cap singles and a cap ensemble =="; drop_block;;
         cap_ens)    : "${WD:?set WD=<lambda> for cap_ens}"
                     echo "== cap_ens: capacity-recipe ensembles (4 members, E=2,3,4) at lambda=$WD =="
