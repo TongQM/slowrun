@@ -190,8 +190,6 @@ def main():
     axB.set_title("(B)  ensembling beats width-scaling at matched compute", fontsize=20, loc="left")
     axB.legend(fontsize=15, loc="upper right")
 
-    fig.suptitle(f"Full data (df=1.0, 100M tokens), d12/w768 base  —  strategy: {STRAT}",
-                 fontsize=20, y=1.02)
     fig.tight_layout()
 
     outdir = os.path.join(REPO, "experiments/figures/02_ensemble_scaling")
