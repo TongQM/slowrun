@@ -10,8 +10,8 @@ Data (all at P=100M, lambda=0, constant LR):
         Figure 6 / the collapsed fit in expt_fig5_model_size_law.py)
   E>1   data_export/100M_data/val_loss_ensembles.csv -- post-hoc replays of the
         first-E checkpoints at the four cells that were trained with 5
-        individuals per strategy: d6/w384 (14M), d12/w384 (28M), d6/w768 (57M),
-        d12/w768 (113M). Replays run to step 23560 (~31 epochs); every minimum
+        individuals per strategy: d6/w384 (11M), d12/w384 (21M), d6/w768 (42M),
+        d12/w768 (85M). Replays run to step 23560 (~31 epochs); every minimum
         used here lands well inside that.
 
 Effective size:  N_eff = E * N.  At fixed training length this is also the
@@ -47,9 +47,10 @@ from matplotlib.lines import Line2D
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from expt_fig1_sister_panels import (  # noqa: E402
+    LOSS_FLOOR, floored_powerlaw_fit,
     CELLS, LOGS, STEPS_PER_EPOCH, find_nadir, load_cell, powerlaw_fit, setup_style,
 )
-from expt_cells import ENSEMBLE_REPLAY_LOGS  # noqa: E402
+from expt_cells import ENSEMBLE_REPLAY_LOGS, n_params  # noqa: E402
 import glob as _glob
 import re as _re
 REPLAY_RE = _re.compile(r"\[step (\d+) ens=(\d+)\] val_loss=([\d.]+)")
@@ -63,21 +64,25 @@ E_SHOW = (2, 3, 4)          # capped at 4, the largest ensemble size trained at 
 
 def load_ensembles():
     """{(L, W, E): (steps, val)} for the primary strategy."""
+    # post-fix ensemble cells: parsed from the finished fused-replay logs
     raw = defaultdict(list)
-    with open(ENS_CSV) as fh:
-        for r in csv.DictReader(fh):
-            if r["strategy"] != STRAT:
-                continue
-            raw[(int(r["depth"]), int(r["width"]), int(r["E"]))].append(
-                (int(r["step"]), float(r["val_loss"])))
-    # post-fix ensemble cells: parsed from the fused-replay logs (only finished replays)
+    replayed = set()
     for (L, W), pat in ENSEMBLE_REPLAY_LOGS.items():
         for f in _glob.glob(str(LOGS / pat)):
             txt = open(f, errors="ignore").read()
             if "Done:" not in txt:
                 continue
+            replayed.add((L, W))
             for m in REPLAY_RE.finditer(txt):
                 raw[(L, W, int(m.group(2)))].append((int(m.group(1)), float(m.group(3))))
+    # exported CSV only where no post-fix replay exists, and only at L=12, where the
+    # CompleteP residual correction is the identity (L!=12 rows there are pre-fix)
+    with open(ENS_CSV) as fh:
+        for r in csv.DictReader(fh):
+            L, W = int(r["depth"]), int(r["width"])
+            if r["strategy"] != STRAT or (L, W) in replayed or L != 12:
+                continue
+            raw[(L, W, int(r["E"]))].append((int(r["step"]), float(r["val_loss"])))
     out = {}
     for k, pts in raw.items():
         pts.sort()
@@ -96,19 +101,19 @@ def main():
         if c is None:
             continue
         i, s_star, l_star = find_nadir(c["val_steps"], c["val"])
-        single[k] = dict(N=16 * k[0] * k[1] ** 2, l_star=l_star, s_star=s_star)
+        single[k] = dict(N=n_params(*k), l_star=l_star, s_star=s_star)
     N1 = np.array([single[k]["N"] for k in single], float)
     L1 = np.array([single[k]["l_star"] for k in single], float)
     # floor-free E=1 law (the asymptote is not identifiable; see expt_fig5's profile panel)
-    c1, a1, r2_1 = powerlaw_fit(N1 / 1e6, L1); Linf = 0.0
-    fit1 = lambda n: c1 * (n / 1e6) ** (-a1)  # noqa: E731
+    c1, a1, r2_1 = floored_powerlaw_fit(N1 / 1e6, L1); Linf = LOSS_FLOOR
+    fit1 = lambda n: Linf + c1 * (n / 1e6) ** (-a1)  # noqa: E731
 
     # ---- E>1: replayed ensembles at the four replicated cells
     ens = load_ensembles()
-    cells_E = sorted({(k[0], k[1]) for k in ens}, key=lambda k: 16 * k[0] * k[1] ** 2)
+    cells_E = sorted({(k[0], k[1]) for k in ens}, key=lambda k: n_params(*k))
     rows = []
     for (L, W) in cells_E:
-        N = 16 * L * W ** 2
+        N = n_params(L, W)
         for E in E_SHOW:
             if (L, W, E) not in ens:
                 continue
@@ -151,7 +156,8 @@ def main():
     # across the replicated cells, drawn and labelled with its exponent, so "same law
     # shifted down" (parallel lines) vs "steeper law" (converging lines) is read off
     # directly. Thin grey connectors still show which points come from one base cell.
-    fig, ax = plt.subplots(figsize=(11, 7.6))
+    fig, (ax, axB) = plt.subplots(1, 2, figsize=(20, 7.6))
+    fig.subplots_adjust(wspace=0.24)
     for (L, W) in cells_E:
         rr = sorted([r for r in rows if (r["L"], r["W"]) == (L, W)], key=lambda r: r["E"])
         xs = [single[(L, W)]["N"]] + [r["N_eff"] for r in rr]
@@ -162,25 +168,52 @@ def main():
     ax.scatter(N1, L1, s=150, color="0.25", edgecolor="black", linewidth=0.9, zorder=4)
     gN = np.logspace(np.log10(N1.min()), np.log10(max(N1.max(), Ne4.max() * 1.25)), 300)
     ax.plot(gN, fit1(gN), "--", color="0.15", lw=2.6, zorder=2,
-            label=fr"$E$=1 ({len(N1)} cells):  $\mathcal{{L}}^*\propto N^{{-{a1:.3f}}}$")
+            label=fr"$E$=1 ({len(N1)} cells):  $\mathcal{{L}}^*-\mathcal{{L}}_\infty\propto N^{{-{a1:.3f}}}$")
     col_E = {E: c for E, c in zip(E_SHOW, sns.color_palette("cool", len(E_SHOW)))}
     per_E = {}
     for E in E_SHOW:
         rr = [r for r in rows if r["E"] == E]
         xe = np.array([r["N_eff"] for r in rr], float); ye = np.array([r["l_star"] for r in rr], float)
         ax.scatter(xe, ye, s=110, color=col_E[E], edgecolor="black", linewidth=0.7, zorder=5)
-        A_E, b_E, r2_E = powerlaw_fit(xe / 1e6, ye)
+        A_E, b_E, r2_E = floored_powerlaw_fit(xe / 1e6, ye)
         per_E[E] = (A_E, b_E, r2_E, len(rr))
         ge = np.logspace(np.log10(xe.min() / 1.3), np.log10(xe.max() * 1.3), 100)
-        ax.plot(ge, A_E * (ge / 1e6) ** (-b_E), "--", color=col_E[E], lw=2.2, zorder=3,
-                label=fr"$E$={E} ({len(rr)} cells):  $\mathcal{{L}}^*\propto (EN)^{{-{b_E:.3f}}}$")
+        ax.plot(ge, LOSS_FLOOR + A_E * (ge / 1e6) ** (-b_E), "--", color=col_E[E], lw=2.2, zorder=3,
+                label=fr"$E$={E} ({len(rr)} cells):  $\mathcal{{L}}^*-\mathcal{{L}}_\infty\propto (EN)^{{-{b_E:.3f}}}$")
     ax.set_xscale("log")
-    ax.set_xticks([2e7, 5e7, 1e8, 2e8, 5e8, 1e9]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M" if x < 1e9 else f"{x/1e9:g}B"))
+    ax.set_xticks([1e7, 2e7, 5e7, 1e8, 2e8, 5e8]); ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}M" if x < 1e9 else f"{x/1e9:g}B"))
     ax.xaxis.set_minor_formatter(plt.NullFormatter())
     ax.set_xlabel(r"effective size  $E\cdot N$   (parameters $\times$ ensemble size)", fontsize=20)
     ax.set_ylabel(r"min val loss  $\mathcal{L}^*$", fontsize=22)
-    ax.set_title("Ensembling against model size: one fitted law per ensemble size", fontsize=16, loc="left")
+    ax.set_title("(A)  min val loss against effective size", fontsize=16, loc="left")
     ax.legend(loc="lower left", frameon=True, framealpha=0.92, fontsize=13)
+
+    # ---- (B) optimal stopping epoch against ensemble size, per cell
+    cells_sorted = sorted({(r["L"], r["W"]) for r in rows}, key=lambda k: n_params(*k))
+    col_cell = dict(zip(cells_sorted, sns.color_palette("cool", len(cells_sorted))))
+    X, Y, G, gam = [], [], [], {}
+    for i, (L, W) in enumerate(cells_sorted):
+        rr = sorted([r for r in rows if (r["L"], r["W"]) == (L, W)], key=lambda r: r["E"])
+        Es = [1] + [r["E"] for r in rr]
+        eps = [rr[0]["single_s_star"] / STEPS_PER_EPOCH] + [r["ep_star"] for r in rr]
+        gam[(L, W)] = float(np.polyfit(np.log(Es), np.log(eps), 1)[0])
+        axB.plot(Es, eps, "-o", color=col_cell[(L, W)], lw=2.2, markersize=11, markeredgecolor="black", zorder=4,
+                 label=fr"$L${L}/$W${W} ({n_params(L, W) / 1e6:.0f}M)")
+        X += list(np.log(Es)); Y += list(np.log(eps)); G += [i] * len(Es)
+    X, Y, G = map(np.array, (X, Y, G))
+    D = np.column_stack([X] + [(G == i).astype(float) for i in range(len(cells_sorted))])
+    coef, *_ = np.linalg.lstsq(D, Y, rcond=None)
+    gamma_shared = float(coef[0])
+    gE = np.linspace(1, 4, 50); ref = np.exp(np.mean(coef[1:]))
+    axB.plot(gE, ref * gE ** gamma_shared, "k--", lw=2.6, zorder=3,
+             label=fr"shared fit: $\mathcal{{E}}^*\propto E^{{{gamma_shared:.2f}}}$")
+    axB.set_yscale("log")
+    axB.set_xticks([1, 2, 3, 4]); axB.set_xlim(0.8, 4.2)
+    axB.set_yticks([5, 7, 10, 15, 20, 30, 40]); axB.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+    axB.yaxis.set_minor_formatter(plt.NullFormatter())
+    axB.set_xlabel(r"ensemble size  $E$", fontsize=22); axB.set_ylabel(r"optimal stopping epoch  $\mathcal{E}^*$", fontsize=22)
+    axB.set_title("(B)  optimal stopping epoch against ensemble size", fontsize=16, loc="left")
+    axB.legend(loc="lower right", frameon=True, framealpha=0.92, fontsize=13)
     for ext in ("pdf", "png"):
         p = OUTDIR / f"expt_fig6_ensemble_vs_size.{ext}"
         fig.savefig(p, bbox_inches="tight", dpi=300)
@@ -202,6 +235,9 @@ def main():
         for E, (A_E, b_E, r2_E, nE) in per_E.items():
             fh.write(f"E{E}_law,form,floor-free L*=A*(EN)_M^-beta,{nE} cells\nE{E}_law,A,{A_E:.6f},\n"
                      f"E{E}_law,beta,{b_E:.6f},\nE{E}_law,R2,{r2_E:.6f},\n")
+        for (L, W), g in gam.items():
+            fh.write(f"epoch_vs_E,L{L}_W{W},{g:.4f},E*=c*E^gamma per cell (E=1..4)\n")
+        fh.write(f"epoch_vs_E,shared,{gamma_shared:.4f},shared exponent with per-cell intercepts\n")
         fh.write(f"E4_H1_shift,Delta,{Delta:.6f},lower floor same excess; SSE={sse_H1:.6f}\n")
         fh.write(f"E4_H2_prefactor,rho,{rho:.6f},same floor smaller excess; SSE={sse_H2:.6f}\n")
         fh.write(f"E4_shared_floor,c,{c4:.6f},two-parameter; SSE={sse_2p:.6f}\n")
