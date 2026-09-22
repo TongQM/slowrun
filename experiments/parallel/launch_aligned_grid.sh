@@ -234,6 +234,38 @@ dyn_pmid() {  # DF (e.g. 0.4 -> P=40M, 0.6 -> P=60M)
     done
 }
 
+# ------------------------------------------------------------------ dropout comparison (Xue et al.)
+#   L12/W768 at dropout 0.1: one single in the dynamics recipe (lambda=0, constant LR) and
+#   one tuned single (lambda=0.2, cooldown), plus 4 tuned members with dropout replayed at
+#   E=2,3,4. Tells whether dropout removes the late-time rise and whether the ensemble
+#   gain persists on top of dropout.
+drop_block() {
+    local L=12 W=768 ts exp su
+    for rec in dyn cap; do
+        ts="${GRID_TAG}_drop_d${L}_w${W}_${rec}"
+        exp=$(common_exports "$L" "$W")
+        exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0,DROPOUT=0.1"
+        if [ "$rec" = dyn ]; then exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0"; else exp+=",NO_WARMDOWN=0,WEIGHT_DECAY=0.2"; fi
+        exp+=",VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0,KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+        [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
+        su=$(su_est "$L" "$W"); TOTAL_SU=$((TOTAL_SU + su))
+        echo "  d${L}/w${W}  dropout 0.1  $rec  model 0   ~${su} SU"
+        JOB=$(submit "al_drop_${rec}_d${L}_w${W}" "$(walltime "$L" "$W")" 0 "$exp"); echo "    job=$JOB"
+    done
+    ts="${GRID_TAG}_dropens_d${L}_w${W}_cap"
+    exp=$(common_exports "$L" "$W")
+    exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=40,DATA_FRACTION=1.0,DROPOUT=0.1"
+    exp+=",NO_WARMDOWN=0,WEIGHT_DECAY=0.2,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0,KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+    exp+=",ENS_SIZES_STR=2 3 4,SKIP_INDIV_VAL=1,END_EPOCH=40,EVAL_MODE=epoch"
+    [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_shuffle_ens_${ts}"
+    su=$(( $(su_est "$L" "$W") * 4 )); TOTAL_SU=$((TOTAL_SU + su))
+    echo "  d${L}/w${W}  dropout 0.1  cap  init_shuffle models 0-3   ~${su} SU"
+    TJOB=$(submit "al_dropens_d${L}_w${W}" "$(walltime "$L" "$W")" "${NUM_MODELS}-$((NUM_MODELS + 3))" "$exp")
+    local rexp; rexp=$(echo "$exp" | sed "s/NUM_MODELS=$NUM_MODELS,/NUM_MODELS=4,/")
+    RJOB=$(submit "al_dropensreplay_d${L}_w${W}" "03:00:00" 1 "$rexp" "--dependency=afterok:$TJOB" experiments/parallel/replay_array_fused.sh)
+    echo "    train job=$TJOB   replay job=$RJOB"
+}
+
 cap_cells() {  # tag "L:W ..." "wd wd ..."
     local tag=$1 cells=$2 wds=$3 L W wd
     for c in $cells; do
@@ -293,6 +325,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_w1728)  s=$(su_est 12 1728);;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
         dyn_p40|dyn_p60) for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) * 3 + 9) / 10)); done;;
+        dropout)    s=$(( 6 * $(su_est 12 768) ));;
         cap_ens)    for c in ${CELLS:-6:384 12:384 6:768 12:768}; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
     esac
@@ -323,6 +356,7 @@ run_block() {
                     cap_cells cap "$ALL12" "$WD";;
         dyn_p40)    echo "== dyn_p40: lambda=0 constant-LR ladder at P=40M =="; dyn_pmid 0.4;;
         dyn_p60)    echo "== dyn_p60: lambda=0 constant-LR ladder at P=60M =="; dyn_pmid 0.6;;
+        dropout)    echo "== dropout: L12/W768 at dropout 0.1, dyn + cap singles and a cap ensemble =="; drop_block;;
         cap_ens)    : "${WD:?set WD=<lambda> for cap_ens}"
                     echo "== cap_ens: capacity-recipe ensembles (4 members, E=2,3,4) at lambda=$WD =="
                     cap_ensemble "${CELLS:-6:384 12:384 6:768 12:768}";;
