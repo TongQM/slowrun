@@ -209,6 +209,31 @@ dyn_p20() {
 }
 
 # ------------------------------------------------------------------ capacity, cooldown ON
+# ------------------------------------------------------------------ dynamics, intermediate-P ladders
+#   Same 7 cells and recipe as dyn_p20 at P = DF*100M; horizon ~1.2B tokens so every run
+#   is well past its minimum. Val every 152 steps keeps the tokens-seen grid of the other
+#   ladders. Epoch checkpoints pruned to every KEEP_EPOCH_EVERY-th.
+dyn_pmid() {  # DF (e.g. 0.4 -> P=40M, 0.6 -> P=60M)
+    local DF=$1 P=$(python3 -c "print(int(round($1*100)))") L W
+    local ep=$(python3 -c "print(int(round(12/$1)))")          # 1.2B tokens / P
+    local cells="6:768 12:768 18:768 24:768 12:384 12:1152 12:1536"
+    for c in $cells; do
+        L=${c%%:*}; W=${c##*:}
+        local ts="${GRID_TAG}_p${P}_d${L}_w${W}"
+        local exp; exp=$(common_exports "$L" "$W")
+        exp+=",SHARED_TIMESTAMP=$ts,WANDB_GROUP=$ts,NUM_EPOCHS=$ep,DATA_FRACTION=$DF"
+        exp+=",NO_WARMDOWN=1,WEIGHT_DECAY=0,VAL_EVERY_N_STEPS=152,CHECKPOINT_EVERY_N_STEPS=0"
+        exp+=",KEEP_EPOCH_CKPTS_EVERY=$KEEP_EPOCH_EVERY"
+        [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
+        # cost scales with tokens: 1.2B / 4B of a full 100M run
+        local su; su=$(( ( $(su_est "$L" "$W") * 3 + 9 ) / 10 )); TOTAL_SU=$((TOTAL_SU + su))
+        local tl; tl=$(walltime "$L" "$W"); tl=$(printf "%02d:00:00" $(( (10#${tl%%:*} * 3 + 9) / 10 + 1 )))
+        echo "  d${L}/w${W}  P=${P}M lambda=0 constant-LR ${ep}ep  model 0   ~${su} SU  $tl"
+        JOB=$(submit "al_p${P}_d${L}_w${W}" "$tl" 0 "$exp")
+        echo "    job=$JOB"
+    done
+}
+
 cap_cells() {  # tag "L:W ..." "wd wd ..."
     local tag=$1 cells=$2 wds=$3 L W wd
     for c in $cells; do
@@ -267,6 +292,7 @@ block_su() {  # SU of a block from the tables, no side effects
         dyn_p20)    for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) + 3) / 4)); done;;
         dyn_w1728)  s=$(su_est 12 1728);;
         cap_lambda) for c in 6:768 48:768 12:1536; do s=$((s + 2 * $(su_est ${c%%:*} ${c##*:}))); done;;
+        dyn_p40|dyn_p60) for c in 6:768 12:768 18:768 24:768 12:384 12:1152 12:1536; do s=$((s + ($(su_est ${c%%:*} ${c##*:}) * 3 + 9) / 10)); done;;
         cap_ens)    for c in ${CELLS:-6:384 12:384 6:768 12:768}; do s=$((s + 4 * $(su_est ${c%%:*} ${c##*:}))); done;;
         cap_grid)   for c in $ALL12; do s=$((s + $(su_est ${c%%:*} ${c##*:}))); done;;
     esac
@@ -295,6 +321,8 @@ run_block() {
         cap_grid)   : "${WD:?set WD=<lambda> for cap_grid (decide after cap_lambda)}"
                     echo "== cap_grid: cooldown ON at lambda=$WD over the 12 cells =="
                     cap_cells cap "$ALL12" "$WD";;
+        dyn_p40)    echo "== dyn_p40: lambda=0 constant-LR ladder at P=40M =="; dyn_pmid 0.4;;
+        dyn_p60)    echo "== dyn_p60: lambda=0 constant-LR ladder at P=60M =="; dyn_pmid 0.6;;
         cap_ens)    : "${WD:?set WD=<lambda> for cap_ens}"
                     echo "== cap_ens: capacity-recipe ensembles (4 members, E=2,3,4) at lambda=$WD =="
                     cap_ensemble "${CELLS:-6:384 12:384 6:768 12:768}";;
