@@ -279,7 +279,7 @@ cap_cells() {  # tag "L:W ..." "wd wd ..."
             [ "$DRY_RUN" = "1" ] || mkdir -p "$CKPT_BASE/parallel_init_ens_${ts}"
             local su; su=$(su_est "$L" "$W"); TOTAL_SU=$((TOTAL_SU + su))
             echo "  d${L}/w${W}  lambda=${wd} cooldown 40ep  model 0   ~${su} SU  $(walltime "$L" "$W")"
-            JOB=$(submit "al_cap_d${L}_w${W}_wd${wd}" "$(walltime "$L" "$W")" 0 "$exp")
+            JOB=$(submit "al_cap_d${L}_w${W}_wd${wd}${MODEL_IDX:+_m$MODEL_IDX}" "$(walltime "$L" "$W")" "${MODEL_IDX:-0}" "$exp")
             echo "    job=$JOB"
         done
     done
@@ -352,8 +352,8 @@ run_block() {
         cap_lambda) echo "== cap_lambda: post-fix lambda-transfer check, cooldown ON =="
                     cap_cells cap "6:768 48:768 12:1536" "0.15 0.3";;
         cap_grid)   : "${WD:?set WD=<lambda> for cap_grid (decide after cap_lambda)}"
-                    echo "== cap_grid: cooldown ON at lambda=$WD over the 12 cells =="
-                    cap_cells cap "$ALL12" "$WD";;
+                    echo "== cap_grid: cooldown ON at lambda=$WD over ${CELLS:-the 12 cells}${MODEL_IDX:+, model index $MODEL_IDX (seed replicate)} =="
+                    cap_cells cap "${CELLS:-$ALL12}" "$WD";;
         dyn_p40)    echo "== dyn_p40: lambda=0 constant-LR ladder at P=40M =="; dyn_pmid 0.4;;
         dyn_p60)    echo "== dyn_p60: lambda=0 constant-LR ladder at P=60M =="; dyn_pmid 0.6;;
         dropout)    echo "== dropout: L12/W768 at dropout 0.1, dyn + cap singles and a cap ensemble =="; drop_block;;
