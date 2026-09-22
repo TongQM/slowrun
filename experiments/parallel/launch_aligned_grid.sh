@@ -117,6 +117,8 @@ common_exports() {  # L W  (n_head = W/64)
 
 submit() {  # name time array exports [dep] [script]
     local name=$1 tl=$2 arr=$3 exp=$4 dep=${5:-} script=${6:-experiments/parallel/train_array.sh}
+    # GATE_JOB=<id>: gate every submission without its own dependency on that job
+    [ -z "$dep" ] && [ -n "${GATE_JOB:-}" ] && dep="--dependency=afterok:$GATE_JOB"
     local sb=(--parsable --account=$ACCOUNT --gpus=$GPU_SPEC --time="$tl" --array="$arr" --job-name="$name" --export="$exp")
     [ -n "$dep" ] && sb+=("$dep")
     if [ "$DRY_RUN" = "1" ]; then
