@@ -213,7 +213,8 @@ def main():
     axB.yaxis.set_minor_formatter(plt.NullFormatter())
     axB.set_xlabel(r"ensemble size  $E$", fontsize=22); axB.set_ylabel(r"optimal stopping epoch  $\mathcal{E}^*$", fontsize=22)
     axB.set_title("(B)  optimal stopping epoch against ensemble size", fontsize=16, loc="left")
-    axB.legend(loc="lower right", frameon=True, framealpha=0.92, fontsize=13)
+    axB.legend(loc="lower right", frameon=True, framealpha=0.92, fontsize=12, ncol=2, columnspacing=0.8, handlelength=1.6, labelspacing=0.3)
+    axB.set_ylim(4.2, 42)
     for ext in ("pdf", "png"):
         p = OUTDIR / f"expt_fig6_ensemble_vs_size.{ext}"
         fig.savefig(p, bbox_inches="tight", dpi=300)
